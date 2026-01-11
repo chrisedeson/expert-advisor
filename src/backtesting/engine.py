@@ -103,7 +103,12 @@ class BacktestEngine:
         df['position_change'] = df['position'].diff().fillna(0)
 
         # Identify entry and exit points
+        # IMPORTANT: Entry happens on NEXT bar after signal change (can't enter same bar as exit)
         df['entry'] = (df['position_change'] != 0) & (df['position'] != 0)
+        # Shift entry to next bar using iloc to avoid fillna warning
+        entry_shifted = pd.Series(False, index=df.index)
+        entry_shifted.iloc[:-1] = df['entry'].iloc[1:].values
+        df['entry'] = entry_shifted
         df['exit'] = (df['position_change'] != 0) & (df['position'].shift(1) != 0)
 
         # Calculate position sizes
@@ -125,6 +130,9 @@ class BacktestEngine:
         # Calculate equity curve
         df['gross_return'] = df['strategy_return']
         df['net_return'] = df['strategy_return'] - df['transaction_costs']
+
+        # Fill NaN returns on first bar with 0 to initialize equity properly
+        df['net_return'] = df['net_return'].fillna(0)
         df['equity'] = self.initial_capital * (1 + df['net_return']).cumprod()
 
         # Check for drawdown breaches
