@@ -1,0 +1,38 @@
+# Strategy Parameters
+
+# Trend Following Strategy
+trend_following:
+  # Moving Averages
+  fast_ma: 20          # Fast moving average period
+  slow_ma: 50          # Slow moving average period
+  ma_type: "EMA"       # SMA or EMA
+
+  # Trend Strength Filter
+  adx_period: 14
+  adx_threshold: 25    # Minimum ADX for trend strength
+
+  # Volatility (ATR)
+  atr_period: 14
+  atr_multiplier: 2.5  # Stop loss distance (ATR * multiplier)
+
+  # Risk Management
+  risk_reward_ratio: 2.0  # Target 2x risk for take profit
+  trailing_stop: true
+  trailing_start: 1.5     # Start trailing at 1.5R
+
+  # Filters
+  use_session_filter: true
+  use_trend_filter: true
+
+  # Parameter Ranges (for optimization)
+  param_ranges:
+    fast_ma: [10, 50]
+    slow_ma: [50, 200]
+    adx_threshold: [20, 35]
+    atr_multiplier: [2.0, 3.5]
+
+# Simple Moving Average Strategy (for testing)
+simple_ma:
+  fast_period: 20
+  slow_period: 50
+  ma_type: "SMA"
