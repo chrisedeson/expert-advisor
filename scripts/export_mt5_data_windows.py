@@ -131,11 +131,16 @@ def main():
     """Export data for all major pairs"""
 
     # Exness uses "m" suffix for symbols
-    pairs = ["EURUSDm", "GBPUSDm", "USDJPYm", "AUDUSDm"]
+    # Added XAUUSDm (GOLD) - could be game changer!
+    pairs = ["EURUSDm", "GBPUSDm", "USDJPYm", "AUDUSDm", "XAUUSDm"]
+
+    # Focus on reliable timeframes with sufficient historical data
+    # Note: Exness doesn't provide M1-M30 data back to 2019 (broker limitation)
+    # H1, H4, D are more reliable for backtesting anyway (less overfitting, lower costs)
     timeframes = ["H1", "H4", "D"]
 
     start_date = datetime(2019, 1, 1)
-    end_date = datetime(2024, 12, 31)
+    end_date = datetime(2025, 12, 31)
 
     output_dir = Path(__file__).parent.parent / "data" / "raw"
 
