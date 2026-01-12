@@ -65,7 +65,7 @@ class DataFetcher:
         if start_date is None:
             start_date = pd.to_datetime(self.config.get("data.start_date", "2019-01-01"))
         if end_date is None:
-            end_date = pd.to_datetime(self.config.get("data.end_date", "2024-12-31"))
+            end_date = pd.to_datetime(self.config.get("data.end_date", "2025-12-31"))
 
         logger.info(f"Fetching {pair} {granularity} from {start_date.date()} to {end_date.date()}")
 
