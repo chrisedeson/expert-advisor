@@ -76,3 +76,38 @@ logging:
   level: INFO
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
   file: "logs/expert_advisor.log"
+
+# Alerts & Notifications
+alerts:
+  email:
+    enabled: false  # Set to true to enable email alerts
+    from: ""        # Your email address
+    to: ""          # Recipient email
+    smtp_server: "" # e.g., smtp.gmail.com
+    smtp_port: 587
+    username: ""    # SMTP username (usually same as from email)
+    password: ""    # SMTP password or app-specific password
+
+  quiet_hours:
+    start: "22:00"  # 10 PM - No alerts during sleep
+    end: "07:00"    # 7 AM
+
+  alert_cooldown: 60  # Minutes between same alert type
+
+  log_file: "logs/alerts.log"
+
+# Risk Management (Smart Grid Protection)
+risk_management:
+  volatility_filter:
+    enabled: true
+    atr_period: 14
+    avg_period: 50
+    normal_threshold: 1.2    # 20% above normal = elevated
+    crisis_threshold: 2.0    # 100% above normal = crisis
+    cooldown_days: 7         # Days to wait after crisis
+
+  circuit_breaker:
+    enabled: true
+    daily_limit: 0.05        # 5% daily loss
+    weekly_limit: 0.10       # 10% weekly loss
+    monthly_limit: 0.15      # 15% monthly loss

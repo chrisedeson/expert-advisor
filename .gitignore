@@ -81,3 +81,7 @@ htmlcov/
 *.tmp
 *.bak
 *.swp
+
+# Docs
+*.md
+*.txt
