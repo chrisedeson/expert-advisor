@@ -104,6 +104,9 @@ class CircuitBreaker:
             'monthly': datetime.now(),
         }
 
+        # Track last known balance for period resets
+        self._last_known_balance = initial_balance
+
         # History
         self.loss_events: list[LossEvent] = []
         self.manual_resume_required = False
@@ -130,6 +133,9 @@ class CircuitBreaker:
         """
         if current_time is None:
             current_time = datetime.now()
+
+        # Track balance for period resets
+        self._last_known_balance = current_balance
 
         # Check if we're in a pause period
         if self.pause_until is not None:
@@ -193,26 +199,24 @@ class CircuitBreaker:
         # Daily reset (at midnight)
         daily_start = self.period_start_time['daily']
         if current_time.date() > daily_start.date():
-            # New day - reset daily tracking
-            logger.debug(f"Resetting daily period tracking")
+            # New day - reset daily tracking AND balance
             self.period_start_time['daily'] = current_time.replace(
                 hour=0, minute=0, second=0, microsecond=0
             )
-            # Don't reset balance here - will be updated when check() called
+            self.period_start_balance['daily'] = self._last_known_balance
 
-        # Weekly reset (on Monday)
+        # Weekly reset (every 7 days)
         weekly_start = self.period_start_time['weekly']
         days_since_weekly_start = (current_time - weekly_start).days
         if days_since_weekly_start >= 7:
-            logger.debug(f"Resetting weekly period tracking")
             self.period_start_time['weekly'] = current_time
-            # Don't reset balance here
+            self.period_start_balance['weekly'] = self._last_known_balance
 
         # Monthly reset (on 1st of month)
         monthly_start = self.period_start_time['monthly']
         if current_time.month != monthly_start.month or current_time.year != monthly_start.year:
-            logger.debug(f"Resetting monthly period tracking")
             self.period_start_time['monthly'] = current_time.replace(day=1, hour=0, minute=0, second=0)
+            self.period_start_balance['monthly'] = self._last_known_balance
 
     def _trigger_daily_pause(
         self,
@@ -448,6 +452,7 @@ class CircuitBreaker:
     def reset(self, initial_balance: float):
         """Reset circuit breaker (for testing)."""
         self.initial_balance = initial_balance
+        self._last_known_balance = initial_balance
         self.state = CircuitBreakerState.ACTIVE
         self.pause_until = None
 

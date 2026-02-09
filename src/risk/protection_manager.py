@@ -76,36 +76,44 @@ class ProtectionManager:
         self.alert_manager = alert_manager
 
         # Initialize all protection systems
-        logger.info("=" * 70)
-        logger.info("INITIALIZING SMART GRID PROTECTION MANAGER")
-        logger.info("=" * 70)
 
         # Layer 1: Real-time Monitoring
+        vol_config = self.config.get('volatility_filter', {})
         self.volatility_filter = VolatilityFilter(
-            atr_period=self.config.get('volatility_filter', {}).get('atr_period', 14),
-            avg_period=self.config.get('volatility_filter', {}).get('avg_period', 50),
-            normal_threshold=self.config.get('volatility_filter', {}).get('normal_threshold', 1.2),
-            crisis_threshold=self.config.get('volatility_filter', {}).get('crisis_threshold', 2.0),
-            crisis_cooldown_days=self.config.get('volatility_filter', {}).get('cooldown_days', 7),
+            atr_period=vol_config.get('atr_period', 14),
+            avg_period=vol_config.get('avg_period', 50),
+            normal_threshold=vol_config.get('normal_threshold', 1.5),
+            crisis_threshold=vol_config.get('crisis_threshold', 2.5),
+            crisis_cooldown_days=vol_config.get('cooldown_days', 3),
         )
 
-        self.crisis_detector = CrisisDetector()
+        crisis_config = self.config.get('crisis_detector', {})
+        self.crisis_detector = CrisisDetector(
+            volatility_spike_threshold=crisis_config.get('volatility_spike_threshold', 2.5),
+            rapid_drawdown_threshold=crisis_config.get('rapid_drawdown_threshold', 0.15),
+            rapid_drawdown_days=crisis_config.get('rapid_drawdown_days', 3),
+            consecutive_stops_threshold=crisis_config.get('consecutive_stops_threshold', 4),
+            gap_threshold_pips=crisis_config.get('gap_threshold_pips', 100.0),
+        )
 
         # Layer 2: Loss Protection
+        cb_config = self.config.get('circuit_breaker', {})
         self.circuit_breaker = CircuitBreaker(
             initial_balance=initial_balance,
-            daily_limit=self.config.get('circuit_breaker', {}).get('daily_limit', 0.05),
-            weekly_limit=self.config.get('circuit_breaker', {}).get('weekly_limit', 0.10),
-            monthly_limit=self.config.get('circuit_breaker', {}).get('monthly_limit', 0.15),
+            daily_limit=cb_config.get('daily_limit', 0.08),
+            weekly_limit=cb_config.get('weekly_limit', 0.15),
+            monthly_limit=cb_config.get('monthly_limit', 0.20),
         )
 
+        recovery_config = self.config.get('recovery_manager', {})
         self.recovery_manager = RecoveryManager(
-            drawdown_threshold=0.10,  # 10% DD triggers recovery
+            drawdown_threshold=recovery_config.get('drawdown_threshold', 0.12),
         )
 
         # Layer 3: Profit Protection
+        profit_config = self.config.get('profit_protector', {})
         self.profit_protector = ProfitProtector(
-            profit_threshold=0.20,  # 20% gain triggers protection
+            profit_threshold=profit_config.get('profit_threshold', 0.20),
         )
 
         # Track state
@@ -113,8 +121,11 @@ class ProtectionManager:
         self.last_check_time = datetime.now()
         self.decision_history: List[ProtectionDecision] = []
 
-        logger.success("✅ All protection systems initialized")
-        logger.info("=" * 70)
+        # State change tracking (only log when state changes)
+        self._prev_protection_set: frozenset = frozenset()
+        self._prev_can_trade: bool = True
+
+        logger.info("All protection systems initialized")
 
     def check_trading_permission(
         self,
@@ -270,11 +281,18 @@ class ProtectionManager:
         if len(self.decision_history) > 1000:
             self.decision_history = self.decision_history[-500:]
 
-        # Log significant events
-        if len(active_protections) > 0:
-            logger.info(f"🛡️ ACTIVE PROTECTIONS: {', '.join(active_protections)}")
-            logger.info(f"   Can trade: {can_trade}, Size: {position_size_multiplier*100:.0f}%")
-            logger.info(f"   Reasoning: {reasoning}")
+        # Log only on state CHANGES (not every bar)
+        current_prot_set = frozenset(active_protections)
+        if current_prot_set != self._prev_protection_set or can_trade != self._prev_can_trade:
+            if active_protections:
+                logger.info(
+                    f"Protection change: {', '.join(active_protections)} | "
+                    f"Trade={can_trade}, Size={position_size_multiplier*100:.0f}%"
+                )
+            elif self._prev_protection_set:
+                logger.info("All protections cleared - normal trading")
+            self._prev_protection_set = current_prot_set
+            self._prev_can_trade = can_trade
 
         # Send alerts if needed
         if self.alert_manager:
@@ -373,4 +391,5 @@ class ProtectionManager:
         self.profit_protector.reset()
         self.peak_balance = self.initial_balance
         self.decision_history = []
-        logger.info("All protection systems reset")
+        self._prev_protection_set = frozenset()
+        self._prev_can_trade = True

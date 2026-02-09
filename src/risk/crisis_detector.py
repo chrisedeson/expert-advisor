@@ -105,10 +105,15 @@ class CrisisDetector:
         self.orange_factors = orange_factors
         self.red_factors = red_factors
 
+        # Auto-reset config
+        self.crisis_cooldown_hours = 48  # Auto-downgrade crisis after 48h
+        self.max_crisis_duration_hours = 168  # Force reset to NORMAL after 7 days max
+
         # State
         self.current_level = CrisisLevel.NORMAL
         self.active_signals: List[CrisisSignal] = []
         self.crisis_start_time: Optional[datetime] = None
+        self._last_consecutive_stop_signal_time: Optional[datetime] = None
 
         # History
         self.recent_trades: List[Dict] = []
@@ -147,13 +152,27 @@ class CrisisDetector:
         """
         # Update histories
         self.balance_history.append((current_time, current_balance))
+        # Trim balance history to last 1000 entries
+        if len(self.balance_history) > 1000:
+            self.balance_history = self.balance_history[-500:]
+
         if recent_trades:
             self.recent_trades = recent_trades[-20:]  # Keep last 20
 
-        # Clear old signals (>1 hour old)
+        # Auto-reset: force downgrade if crisis has lasted too long
+        if self.crisis_start_time is not None:
+            hours_in_crisis = (current_time - self.crisis_start_time).total_seconds() / 3600
+            if hours_in_crisis >= self.max_crisis_duration_hours:
+                logger.info(f"Crisis auto-reset after {hours_in_crisis:.0f} hours")
+                self.active_signals = []
+                self.crisis_start_time = None
+                self.current_level = CrisisLevel.NORMAL
+                return CrisisLevel.NORMAL
+
+        # Clear old signals (>4 hours old instead of 1 hour)
         self.active_signals = [
             s for s in self.active_signals
-            if (current_time - s.timestamp).total_seconds() < 3600
+            if (current_time - s.timestamp).total_seconds() < 14400  # 4 hours
         ]
 
         # Check each crisis factor
@@ -242,10 +261,17 @@ class CrisisDetector:
             )
 
     def _check_consecutive_stops(self, current_time: datetime):
-        """Check for consecutive stop losses"""
+        """Check for consecutive stop losses - only triggers once per new loss"""
 
         if len(self.recent_trades) < self.consecutive_stops_threshold:
             return
+
+        # Only check if we have a NEW trade since last check
+        last_trade_time = self.recent_trades[-1].get('exit_time')
+        if (self._last_consecutive_stop_signal_time is not None and
+                last_trade_time is not None and
+                last_trade_time <= self._last_consecutive_stop_signal_time):
+            return  # No new trades, don't re-trigger
 
         # Get last N trades
         last_n = self.recent_trades[-self.consecutive_stops_threshold:]
@@ -275,9 +301,10 @@ class CrisisDetector:
             )
 
             self.active_signals.append(signal)
+            self._last_consecutive_stop_signal_time = current_time
 
             logger.warning(
-                f"🛑 CONSECUTIVE STOPS DETECTED: {consecutive_count} losses in a row"
+                f"CONSECUTIVE STOPS DETECTED: {consecutive_count} losses in a row"
             )
 
     def _check_gap_event(
