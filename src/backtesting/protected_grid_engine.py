@@ -450,9 +450,7 @@ class ProtectedGridBacktester:
         grid_level = signal['grid_level']
         current_price = current_bar['close']
 
-        # Proportional lot sizing: scale with account growth (compound returns)
-        equity_ratio = max(self.cash_balance / self.initial_balance, 0.3)  # Floor at 30%
-        lot_size = self.base_lot * equity_ratio * (self.lot_multiplier ** grid_level) * size_multiplier
+        lot_size = self.base_lot * (self.lot_multiplier ** grid_level) * size_multiplier
 
         if lot_size < 0.001:
             return
@@ -505,10 +503,12 @@ class ProtectedGridBacktester:
         self.open_positions = []
 
     def _update_open_positions(self, current_time: datetime, current_bar: pd.Series):
-        """Check SL/TP hits on open positions."""
+        """Check SL/TP hits and update trailing stops on open positions."""
         to_close = []
+        current_atr = current_bar['atr'] if not pd.isna(current_bar['atr']) else 0
 
         for pos in self.open_positions:
+            # --- Check SL/TP exits first ---
             if pos.direction == 'BUY':
                 if current_bar['high'] >= pos.take_profit:
                     self._close_position(pos, current_time, pos.take_profit, "Take Profit")
@@ -526,6 +526,21 @@ class ProtectedGridBacktester:
 
         for pos in to_close:
             self.open_positions.remove(pos)
+
+        # --- Update trailing stops on remaining positions (takes effect next bar) ---
+        if current_atr > 0:
+            for pos in self.open_positions:
+                if pos.direction == 'BUY':
+                    # Trail SL behind the high once 1.0*ATR in profit
+                    max_favorable = current_bar['high'] - pos.entry_price
+                    if max_favorable >= 1.0 * current_atr:
+                        trail_sl = current_bar['high'] - 1.5 * current_atr
+                        pos.stop_loss = max(pos.stop_loss, trail_sl)
+                else:
+                    max_favorable = pos.entry_price - current_bar['low']
+                    if max_favorable >= 1.0 * current_atr:
+                        trail_sl = current_bar['low'] + 1.5 * current_atr
+                        pos.stop_loss = min(pos.stop_loss, trail_sl)
 
     def _close_position(
         self,
