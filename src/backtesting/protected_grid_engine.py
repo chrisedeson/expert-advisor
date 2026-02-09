@@ -112,12 +112,16 @@ class ProtectedGridBacktester:
         spread_pips: float = 1.2,
         commission_per_lot: float = 0.0,
         slippage_pips: float = 0.2,
+        pip_size: float = 0.0001,
+        pip_value_per_lot: float = 10.0,
     ):
         self.initial_balance = initial_balance
         self.config = config
         self.spread_pips = spread_pips
         self.commission_per_lot = commission_per_lot
         self.slippage_pips = slippage_pips
+        self.pip_size = pip_size
+        self.pip_value_per_lot = pip_value_per_lot
 
         grid_config = config.get('grid_strategy', {})
         self.base_lot = grid_config.get('base_lot_size', 0.01)
@@ -277,10 +281,10 @@ class ProtectedGridBacktester:
         unrealized = 0.0
         for pos in self.open_positions:
             if pos.direction == 'BUY':
-                pips = (current_price - pos.entry_price) * 10000
+                pips = (current_price - pos.entry_price) / self.pip_size
             else:
-                pips = (pos.entry_price - current_price) * 10000
-            unrealized += pips * 10.0 * pos.lot_size
+                pips = (pos.entry_price - current_price) / self.pip_size
+            unrealized += pips * self.pip_value_per_lot * pos.lot_size
         return self.cash_balance + unrealized
 
     def _get_recent_trade_dicts(self) -> List[Dict]:
@@ -391,7 +395,7 @@ class ProtectedGridBacktester:
             if buy_signal and self._check_cooldown('BUY', current_time):
                 # TP at OPPOSITE (upper) BB - full band traversal
                 tp_price = upper_bb
-                tp_distance_pips = (tp_price - current_price) * 10000
+                tp_distance_pips = (tp_price - current_price) / self.pip_size
 
                 if tp_distance_pips >= self.min_tp_pips:
                     sl_price = current_price - 1.5 * current_atr
@@ -420,7 +424,7 @@ class ProtectedGridBacktester:
             if sell_signal and self._check_cooldown('SELL', current_time):
                 # TP at OPPOSITE (lower) BB
                 tp_price = lower_bb
-                tp_distance_pips = (current_price - tp_price) * 10000
+                tp_distance_pips = (current_price - tp_price) / self.pip_size
 
                 if tp_distance_pips >= self.min_tp_pips:
                     sl_price = current_price + 1.5 * current_atr
@@ -574,15 +578,15 @@ class ProtectedGridBacktester:
         position.exit_reason = exit_reason
 
         if position.direction == 'BUY':
-            pips = (exit_price - position.entry_price) * 10000
+            pips = (exit_price - position.entry_price) / self.pip_size
         else:
-            pips = (position.entry_price - exit_price) * 10000
+            pips = (position.entry_price - exit_price) / self.pip_size
 
         # Subtract transaction costs
         pips -= (self.spread_pips + self.slippage_pips)
 
         position.pips = pips
-        position.gross_pnl = pips * 10.0 * position.lot_size
+        position.gross_pnl = pips * self.pip_value_per_lot * position.lot_size
 
         commission = self.commission_per_lot * position.lot_size
         position.net_pnl = position.gross_pnl - commission
