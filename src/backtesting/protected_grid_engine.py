@@ -149,7 +149,7 @@ class ProtectedGridBacktester:
         # Entry cooldown tracking
         self._last_buy_time: Optional[datetime] = None
         self._last_sell_time: Optional[datetime] = None
-        self._min_hours_between_entries = 3  # Min hours between same-direction entries
+        self._min_hours_between_entries = 1  # Min hours between same-direction entries
 
         # Protection state change tracking (to avoid logging every bar)
         self._prev_protection_state: Optional[str] = None
@@ -346,6 +346,14 @@ class ProtectedGridBacktester:
         if current_atr <= 0 or pd.isna(current_atr):
             return None
 
+        # Volatility band filter: skip low-vol chop AND high-vol chaos
+        atr_series = recent_data['atr']
+        avg_atr = atr_series.rolling(50).mean().iloc[-1]
+        if not pd.isna(avg_atr) and avg_atr > 0:
+            atr_ratio = current_atr / avg_atr
+            if atr_ratio < 0.8 or atr_ratio > 3.0:
+                return None
+
         sma50 = close_prices.rolling(50).mean().iloc[-1]
         sma200 = close_prices.rolling(200).mean().iloc[-1] if len(close_prices) >= 200 else sma50
         std50 = close_prices.rolling(50).std().iloc[-1]
@@ -376,7 +384,7 @@ class ProtectedGridBacktester:
                     grid_level = 0
             else:
                 lowest_buy = min(p.entry_price for p in buy_positions)
-                if current_price < lowest_buy - 1.0 * current_atr:
+                if current_price < lowest_buy - 0.75 * current_atr:
                     buy_signal = True
                     grid_level = len(buy_positions)
 
@@ -386,7 +394,7 @@ class ProtectedGridBacktester:
                 tp_distance_pips = (tp_price - current_price) * 10000
 
                 if tp_distance_pips >= self.min_tp_pips:
-                    sl_price = current_price - 2.0 * current_atr
+                    sl_price = current_price - 1.5 * current_atr
                     return {
                         'direction': 'BUY',
                         'grid_level': grid_level,
@@ -405,7 +413,7 @@ class ProtectedGridBacktester:
                     grid_level = 0
             else:
                 highest_sell = max(p.entry_price for p in sell_positions)
-                if current_price > highest_sell + 1.0 * current_atr:
+                if current_price > highest_sell + 0.75 * current_atr:
                     sell_signal = True
                     grid_level = len(sell_positions)
 
@@ -415,7 +423,7 @@ class ProtectedGridBacktester:
                 tp_distance_pips = (current_price - tp_price) * 10000
 
                 if tp_distance_pips >= self.min_tp_pips:
-                    sl_price = current_price + 2.0 * current_atr
+                    sl_price = current_price + 1.5 * current_atr
                     return {
                         'direction': 'SELL',
                         'grid_level': grid_level,
@@ -445,12 +453,14 @@ class ProtectedGridBacktester:
         size_multiplier: float,
         active_protections: List[str],
     ):
-        """Execute an entry signal."""
+        """Execute an entry signal with compounding lot sizing."""
         direction = signal['direction']
         grid_level = signal['grid_level']
         current_price = current_bar['close']
 
-        lot_size = self.base_lot * (self.lot_multiplier ** grid_level) * size_multiplier
+        # Compounding: scale lots proportionally to account growth
+        equity_ratio = max(self.cash_balance / self.initial_balance, 0.5)
+        lot_size = self.base_lot * (self.lot_multiplier ** grid_level) * size_multiplier * equity_ratio
 
         if lot_size < 0.001:
             return
@@ -527,20 +537,29 @@ class ProtectedGridBacktester:
         for pos in to_close:
             self.open_positions.remove(pos)
 
-        # --- Update trailing stops on remaining positions (takes effect next bar) ---
+        # --- Two-stage stop management (takes effect next bar) ---
+        # Stage 1: Move to breakeven after 1.0*ATR profit (protect capital)
+        # Stage 2: Start trailing at 1.5*ATR behind high/low after 2.0*ATR profit (let winners run)
         if current_atr > 0:
             for pos in self.open_positions:
                 if pos.direction == 'BUY':
-                    # Trail SL behind the high once 1.0*ATR in profit
                     max_favorable = current_bar['high'] - pos.entry_price
-                    if max_favorable >= 1.0 * current_atr:
+                    if max_favorable >= 2.0 * current_atr:
+                        # Stage 2: Trail at 1.5*ATR behind high
                         trail_sl = current_bar['high'] - 1.5 * current_atr
                         pos.stop_loss = max(pos.stop_loss, trail_sl)
+                    elif max_favorable >= 1.0 * current_atr:
+                        # Stage 1: Move to breakeven
+                        pos.stop_loss = max(pos.stop_loss, pos.entry_price)
                 else:
                     max_favorable = pos.entry_price - current_bar['low']
-                    if max_favorable >= 1.0 * current_atr:
+                    if max_favorable >= 2.0 * current_atr:
+                        # Stage 2: Trail at 1.5*ATR above low
                         trail_sl = current_bar['low'] + 1.5 * current_atr
                         pos.stop_loss = min(pos.stop_loss, trail_sl)
+                    elif max_favorable >= 1.0 * current_atr:
+                        # Stage 1: Move to breakeven
+                        pos.stop_loss = min(pos.stop_loss, pos.entry_price)
 
     def _close_position(
         self,

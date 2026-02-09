@@ -39,16 +39,16 @@ def load_config() -> dict:
     # Always use grid-tuned defaults (config.yaml has different structure)
     return {
             'grid_strategy': {
-                'base_lot_size': 0.01,
-                'lot_multiplier': 1.3,
+                'base_lot_size': 0.0228,
+                'lot_multiplier': 1.5,
                 'max_grid_levels': 5,
             },
             'volatility_filter': {
                 'atr_period': 14,
                 'avg_period': 50,
-                'normal_threshold': 2.5,
-                'crisis_threshold': 4.0,
-                'cooldown_days': 5,
+                'normal_threshold': 10.0,
+                'crisis_threshold': 20.0,
+                'cooldown_days': 0,
             },
             'circuit_breaker': {
                 'daily_limit': 0.20,
@@ -56,13 +56,16 @@ def load_config() -> dict:
                 'monthly_limit': 0.50,
             },
             'crisis_detector': {
-                'volatility_spike_threshold': 4.0,
-                'rapid_drawdown_threshold': 0.30,
+                'volatility_spike_threshold': 6.0,
+                'rapid_drawdown_threshold': 0.50,
                 'rapid_drawdown_days': 3,
-                'consecutive_stops_threshold': 8,
+                'consecutive_stops_threshold': 15,
             },
             'recovery_manager': {
                 'drawdown_threshold': 0.40,
+            },
+            'profit_protector': {
+                'profit_threshold': 1.0,  # Disable for compounding strategy
             },
         }
 
