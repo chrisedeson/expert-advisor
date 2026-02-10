@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3:*)",
+      "Bash(source:*)",
+      "Bash(python scripts/prepare_data_for_testing.py:*)",
+      "Bash(python:*)",
+      "Bash(tee:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(git status:*)",
+      "Bash(git checkout:*)"
+    ]
+  }
+}
