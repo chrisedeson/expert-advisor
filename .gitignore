@@ -72,6 +72,7 @@ logs/*
 # OS
 .DS_Store
 Thumbs.db
+*:Zone.Identifier
 
 # Testing
 .pytest_cache/
