@@ -12,7 +12,8 @@ Optimization is COMPLETE. Now building the live trading engine.
 - 5 MC-validated instruments: EURUSD, GBPUSD, EURJPY, XAGUSD, US500
 - Session filter: 12-16 UTC (London/NY overlap) - THE key edge
 - Portfolio MC: Conservative and Balanced pass at 100% profitable
-- Next: Build live trading engine, deploy, paper trade
+- Live engine: DEPLOYED as systemd service on EC2 (paper trading)
+- Next: Paper trade 1-3 months, then connect real broker for live
 
 ### Industry Benchmarks
 - Waka Waka EA (best grid EA): 18% annual, 12% DD
@@ -67,14 +68,36 @@ max_grid_levels: 5           # Max grid depth
 - `volatility_filter.py` - Effectively disabled (10.0/20.0)
 - `profit_protector.py` - DISABLED for compounding (threshold=100.0)
 
-### Live Trading Engine: `src/live/` (TO BE BUILT)
-- `signal_engine.py` - Signal logic extracted from backtest engine
-- `live_engine.py` - Main loop: poll H1 candles, check signals, manage orders
-- `broker_interface.py` - Abstract broker API
-- `simulated_broker.py` - Paper trading broker
-- `position_tracker.py` - Track open positions per instrument
-- `state_manager.py` - Persist state to JSON
-- `session_filter.py` - 12-16 UTC filter
+### Live Trading Engine: `src/live/` (DEPLOYED)
+- `signal_engine.py` - Signal logic extracted from backtest engine (BB entry, trend filter, trailing stops)
+- `live_engine.py` - Main loop with risk profiles, position management, state persistence
+- `broker_interface.py` - Abstract broker API (swap in real broker later)
+- `simulated_broker.py` - Paper trading broker (loads candle data from parquet files)
+- `session_filter.py` - 12-16 UTC overlap filter (skips weekends)
+- `state_manager.py` - JSON state persistence + JSONL trade log
+
+### Live Engine Entry Points
+- `scripts/run_live.py` - CLI with --profile, --capital, --status, --list-profiles
+- `configs/live_config.yaml` - Live trading configuration
+- `systemd/expert-advisor.service` - Auto-restart service (deployed on EC2)
+
+### Live Engine Commands
+```bash
+# Check service status
+sudo systemctl status expert-advisor
+
+# View live logs
+tail -f logs/service.log
+
+# List available profiles
+python scripts/run_live.py --list-profiles
+
+# Run with different profile
+python scripts/run_live.py --profile balanced --capital 1000
+
+# Check engine status
+python scripts/run_live.py --status
+```
 
 ## MC-Validated Instruments (Phase 8)
 

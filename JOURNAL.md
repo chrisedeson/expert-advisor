@@ -246,11 +246,50 @@ MC validated: 100% profitable across 50 stress simulations
 - ~~Portfolio correlation~~ DONE - near-zero correlations, Sharpe 2.46
 - ~~Portfolio MC validation~~ DONE - Conservative and Balanced pass
 
+## Phase 10: Live Trading Engine (Deployed, Feb 11 2026)
+
+Built and deployed the live paper trading engine on EC2.
+
+### Architecture
+| Module | What It Does |
+|--------|-------------|
+| `src/live/signal_engine.py` | Extracts BB entry signals + trailing stop logic from the backtest engine |
+| `src/live/live_engine.py` | Main loop: checks 5 instruments every 60s during 12-16 UTC, manages positions |
+| `src/live/simulated_broker.py` | Paper trading - no real money, uses candle data to simulate fills |
+| `src/live/broker_interface.py` | Abstract API - swap in Exness/MT5 connector later for real trading |
+| `src/live/session_filter.py` | Only trades during 12-16 UTC overlap, sleeps the rest of the day |
+| `src/live/state_manager.py` | Saves state to disk so it survives restarts without losing positions |
+
+### Risk Profiles Available
+| Profile | Base Lot | Multiplier | What It Means |
+|---------|----------|------------|---------------|
+| Conservative | 0.02 | 1.5x | Slow and steady, ~15% annual, tiny drawdowns |
+| Balanced | 0.03 | 2.0x | Moderate risk, ~27% annual, still very safe |
+| Growth | 0.04 | 2.0x | More aggressive, higher returns but failed portfolio MC |
+| Aggressive | 0.05 | 2.5x | High risk, not recommended for live |
+
+### Deployment
+- Running as `systemd` service: auto-starts on boot, auto-restarts on crash
+- Currently: **Conservative profile, $500 paper money**
+- Instruments: EURUSD, GBPUSD, EURJPY, XAGUSD, US500 (equal 20% each)
+- Logs: `logs/service.log` + individual session logs in `logs/`
+- State: `state/live_state.json` + `state/trade_log.jsonl`
+
+### How to Check On It
+```bash
+sudo systemctl status expert-advisor    # Is it running?
+tail -f logs/service.log                # Watch live logs
+python scripts/run_live.py --status     # Engine status
+python scripts/run_live.py --list-profiles  # See profiles
+```
+
+---
+
 ## Next Steps
-- **Build live trading engine** (in progress)
-- Deploy as systemd service on EC2
-- Paper trade for 1-3 months
-- Go live after validation
+- **Paper trade for 1-3 months** - validate that live signals match backtest expectations
+- **Connect real broker** - build MT5/Exness connector to replace simulated broker
+- **Go live** - start with conservative profile, small capital
+- **Monitor and adjust** - compare live PF/Sharpe/DD with backtest numbers
 
 ---
 
