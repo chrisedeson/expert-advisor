@@ -1,0 +1,33 @@
+# Live Trading Configuration
+# Expert Advisor - 5 Instrument Portfolio
+
+# Risk profile: conservative, balanced, growth, aggressive
+risk_profile: conservative
+
+# Initial capital in USD
+capital: 500.0
+
+# Paper trading mode (set to false for live)
+paper_mode: true
+
+# Session hours (UTC)
+session:
+  start_hour: 12
+  end_hour: 16
+
+# Instrument allocation (must sum to 1.0)
+allocation:
+  EURUSD: 0.20
+  GBPUSD: 0.20
+  EURJPY: 0.20
+  XAGUSD: 0.20
+  US500: 0.20
+
+# State persistence directory
+state_dir: state
+
+# Data directory (for simulated broker)
+data_dir: data/processed
+
+# Logging
+log_dir: logs
