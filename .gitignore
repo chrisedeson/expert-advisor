@@ -90,4 +90,5 @@ htmlcov/
 *.md
 !JOURNAL.md
 !README.md
+!CLAUDE.md
 *.txt
