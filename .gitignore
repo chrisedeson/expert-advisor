@@ -66,9 +66,13 @@ logs/*
 !logs/.gitkeep
 *.log
 
+# SSH/Keys
+*.pem
+
 # OS
 .DS_Store
 Thumbs.db
+*:Zone.Identifier
 
 # Testing
 .pytest_cache/
@@ -84,4 +88,7 @@ htmlcov/
 
 # Docs
 *.md
+!JOURNAL.md
+!README.md
+!CLAUDE.md
 *.txt

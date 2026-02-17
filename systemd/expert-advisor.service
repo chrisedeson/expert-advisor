@@ -1,0 +1,16 @@
+[Unit]
+Description=Expert Advisor Live Trading Engine
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/expert-advisor
+ExecStart=/home/ubuntu/expert-advisor/.venv/bin/python scripts/run_live.py --profile conservative --capital 500
+Restart=always
+RestartSec=30
+StandardOutput=append:/home/ubuntu/expert-advisor/logs/service.log
+StandardError=append:/home/ubuntu/expert-advisor/logs/service.log
+
+[Install]
+WantedBy=multi-user.target

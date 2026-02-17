@@ -127,6 +127,11 @@ class ProtectedGridBacktester:
         self.base_lot = grid_config.get('base_lot_size', 0.01)
         self.lot_multiplier = grid_config.get('lot_multiplier', 1.2)
         self.max_grid_levels = grid_config.get('max_grid_levels', 5)
+        self.use_trend_filter = grid_config.get('use_trend_filter', True)
+        self.compound_on_equity = grid_config.get('compound_on_equity', False)
+        self.bb_entry_mult = grid_config.get('bb_entry_mult', 2.0)
+        self.grid_spacing_atr = grid_config.get('grid_spacing_atr', 0.75)
+        self.sl_atr_mult = grid_config.get('sl_atr_mult', 1.5)
 
         # Minimum TP distance in pips (must exceed costs)
         self.min_tp_pips = self.spread_pips + self.slippage_pips + 5.0
@@ -367,18 +372,22 @@ class ProtectedGridBacktester:
         if pd.isna(sma200):
             return None
 
-        upper_bb = sma50 + 2.0 * std50
-        lower_bb = sma50 - 2.0 * std50
+        upper_bb = sma50 + self.bb_entry_mult * std50
+        lower_bb = sma50 - self.bb_entry_mult * std50
 
         # Trend direction: SMA(50) vs SMA(200)
         is_uptrend = sma50 > sma200
         is_downtrend = sma50 < sma200
 
+        # When trend filter is disabled, allow both directions
+        allow_buy = is_uptrend if self.use_trend_filter else True
+        allow_sell = is_downtrend if self.use_trend_filter else True
+
         buy_positions = [p for p in self.open_positions if p.direction == 'BUY']
         sell_positions = [p for p in self.open_positions if p.direction == 'SELL']
 
-        # === BUY SIGNALS (uptrend only - buy dips, target opposite BB) ===
-        if is_uptrend and len(buy_positions) < self.max_grid_levels:
+        # === BUY SIGNALS ===
+        if allow_buy and len(buy_positions) < self.max_grid_levels:
             buy_signal = False
             grid_level = 0
 
@@ -388,7 +397,7 @@ class ProtectedGridBacktester:
                     grid_level = 0
             else:
                 lowest_buy = min(p.entry_price for p in buy_positions)
-                if current_price < lowest_buy - 0.75 * current_atr:
+                if current_price < lowest_buy - self.grid_spacing_atr * current_atr:
                     buy_signal = True
                     grid_level = len(buy_positions)
 
@@ -398,7 +407,7 @@ class ProtectedGridBacktester:
                 tp_distance_pips = (tp_price - current_price) / self.pip_size
 
                 if tp_distance_pips >= self.min_tp_pips:
-                    sl_price = current_price - 1.5 * current_atr
+                    sl_price = current_price - self.sl_atr_mult * current_atr
                     return {
                         'direction': 'BUY',
                         'grid_level': grid_level,
@@ -406,8 +415,8 @@ class ProtectedGridBacktester:
                         'sl': sl_price,
                     }
 
-        # === SELL SIGNALS (downtrend only - sell rallies, target opposite BB) ===
-        if is_downtrend and len(sell_positions) < self.max_grid_levels:
+        # === SELL SIGNALS ===
+        if allow_sell and len(sell_positions) < self.max_grid_levels:
             sell_signal = False
             grid_level = 0
 
@@ -417,7 +426,7 @@ class ProtectedGridBacktester:
                     grid_level = 0
             else:
                 highest_sell = max(p.entry_price for p in sell_positions)
-                if current_price > highest_sell + 0.75 * current_atr:
+                if current_price > highest_sell + self.grid_spacing_atr * current_atr:
                     sell_signal = True
                     grid_level = len(sell_positions)
 
@@ -427,7 +436,7 @@ class ProtectedGridBacktester:
                 tp_distance_pips = (current_price - tp_price) / self.pip_size
 
                 if tp_distance_pips >= self.min_tp_pips:
-                    sl_price = current_price + 1.5 * current_atr
+                    sl_price = current_price + self.sl_atr_mult * current_atr
                     return {
                         'direction': 'SELL',
                         'grid_level': grid_level,
@@ -463,7 +472,11 @@ class ProtectedGridBacktester:
         current_price = current_bar['close']
 
         # Compounding: scale lots proportionally to account growth
-        equity_ratio = max(self.cash_balance / self.initial_balance, 0.5)
+        if self.compound_on_equity:
+            current_equity = self._calculate_equity(current_price)
+            equity_ratio = max(current_equity / self.initial_balance, 0.5)
+        else:
+            equity_ratio = max(self.cash_balance / self.initial_balance, 0.5)
         lot_size = self.base_lot * (self.lot_multiplier ** grid_level) * size_multiplier * equity_ratio
 
         if lot_size < 0.001:

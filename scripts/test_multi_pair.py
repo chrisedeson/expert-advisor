@@ -462,68 +462,85 @@ def run_lot_sweep(pair_data: dict, eur_pct: float, gbp_pct: float,
     PAIR_CONFIGS['GBPUSD']['base_lot_size'] = 0.0228
 
 
+def make_aggressive_config(lot, mult, use_trend=True, compound_equity=False,
+                           bb_mult=2.0, grid_spacing=0.75, sl_mult=1.5):
+    """Create aggressive config with selective protections."""
+    config = load_config(base_lot_size=lot)
+    config['grid_strategy']['lot_multiplier'] = mult
+    config['grid_strategy']['use_trend_filter'] = use_trend
+    config['grid_strategy']['compound_on_equity'] = compound_equity
+    config['grid_strategy']['bb_entry_mult'] = bb_mult
+    config['grid_strategy']['grid_spacing_atr'] = grid_spacing
+    config['grid_strategy']['sl_atr_mult'] = sl_mult
+    # Disable recovery manager (chokes at high lots)
+    config['recovery_manager'] = {'drawdown_threshold': 1.0}
+    config['profit_protector'] = {'profit_threshold': 100.0}
+    # Keep crisis detector + CB (they help)
+    return config
+
+
 def main():
-    """Run targeted portfolio fine-tuning."""
+    """Frequency and compounding experiments for max returns."""
     logger.info("=" * 80)
-    logger.info("MULTI-PAIR PORTFOLIO FINE-TUNING")
+    logger.info("FREQUENCY + COMPOUNDING EXPERIMENTS")
     logger.info("=" * 80)
 
     total_capital = 500.0
 
-    # Load data
+    # Load EURUSD only (GBP too slow with aggressive settings)
     logger.info("\nLoading data...")
-    pair_data = {}
-    for pair in ['EURUSD', 'GBPUSD']:
-        data = load_historical_data(pair, 'H1')
-        if data is not None:
-            pair_data[pair] = data
+    data = load_historical_data('EURUSD', 'H1')
 
-    # === OPTIMAL PORTFOLIO CONFIGURATION ===
-    # EUR+GBP 80/20 allocation, EUR lot=0.0258, GBP lot=0.0180
-    # Discovered through systematic sweep:
-    #   - 80/20 split: best Sharpe among all allocations (1.01)
-    #   - EUR lot=0.0258: CAGR 23%+ with ~1% DD safety margin under 20%
-    #   - GBP lot=0.0180: reduces GBP DD contribution while maintaining diversification
-    #   - Correlation EUR/GBP ~0.057: near-independent equity curves
-    PAIR_CONFIGS['EURUSD']['base_lot_size'] = 0.0258
-    PAIR_CONFIGS['GBPUSD']['base_lot_size'] = 0.0180
+    # Base config: lot=0.06, mult=2.5, crisis+CB (best from phase 4: $36K, 73% CAGR)
+    # Now test what happens when we boost frequency
 
-    logger.info("\nRunning OPTIMAL portfolio: EUR 80% (lot=0.0258) + GBP 20% (lot=0.0180)")
+    print("\n" + "=" * 90)
+    print("FREQUENCY BOOSTERS (base: lot=0.06, mult=2.5, crisis+CB)")
+    print("=" * 90)
+    print(f"\n  {'Config':>40} {'CAGR':>8} {'DD':>8} {'Final$':>12} {'PF':>8} {'Sharpe':>8} {'Trades':>8}")
+    print(f"  {'-'*90}")
 
-    pair_results = {}
-    pair_results['EURUSD'] = run_single_pair('EURUSD', pair_data['EURUSD'], 400)
-    pair_results['GBPUSD'] = run_single_pair('GBPUSD', pair_data['GBPUSD'], 100)
-    portfolio = calculate_portfolio_metrics(pair_results, total_capital)
+    experiments = [
+        # (label, lot, mult, use_trend, compound_equity, bb_mult, grid_spacing, sl_mult)
+        # Baseline
+        ("Baseline trend+BB2.0",                  0.06, 2.5, True,  False, 2.0, 0.75, 1.5),
+        # Trend filter ON + frequency boosters
+        ("Trend + BB(1.5)",                       0.06, 2.5, True,  False, 1.5, 0.75, 1.5),
+        ("Trend + BB(1.75)",                      0.06, 2.5, True,  False, 1.75, 0.75, 1.5),
+        ("Trend + tight grid(0.50)",              0.06, 2.5, True,  False, 2.0, 0.50, 1.5),
+        ("Trend + tight grid(0.60)",              0.06, 2.5, True,  False, 2.0, 0.60, 1.5),
+        ("Trend + BB1.5 + grid0.50",              0.06, 2.5, True,  False, 1.5, 0.50, 1.5),
+        # Equity compounding variants
+        ("Trend + equity compound",               0.06, 2.5, True,  True,  2.0, 0.75, 1.5),
+        ("Trend + BB1.5 + equity",                0.06, 2.5, True,  True,  1.5, 0.75, 1.5),
+        ("Trend + BB1.5 + eq + grid0.5",          0.06, 2.5, True,  True,  1.5, 0.50, 1.5),
+        # Scale up lot with best frequency config
+        ("Trend + BB1.5 lot=0.08",                0.08, 2.5, True,  False, 1.5, 0.75, 1.5),
+        ("Trend + BB1.5 + eq lot=0.08",           0.08, 2.5, True,  True,  1.5, 0.75, 1.5),
+        ("Trend + BB1.5 lot=0.10",                0.10, 2.5, True,  False, 1.5, 0.75, 1.5),
+        ("Trend + BB1.5 + eq lot=0.10",           0.10, 2.5, True,  True,  1.5, 0.75, 1.5),
+        # Grid levels boost
+        ("Trend + BB1.5 + eq l=0.08 mult3",      0.08, 3.0, True,  True,  1.5, 0.75, 1.5),
+        ("Trend + BB1.5 + eq l=0.10 mult3",      0.10, 3.0, True,  True,  1.5, 0.75, 1.5),
+    ]
 
-    print_portfolio_summary(portfolio, pair_results)
-    print_go_no_go(portfolio, pair_results)
-
-    # Run single-pair EURUSD baseline for comparison
-    logger.info("\nRunning EURUSD-only baseline ($500, lot=0.0228)...")
-    PAIR_CONFIGS['EURUSD']['base_lot_size'] = 0.0228
-    baseline_result = run_single_pair('EURUSD', pair_data['EURUSD'], total_capital)
-
-    print("\n" + "=" * 80)
-    print("PORTFOLIO vs SINGLE-PAIR EURUSD ($500) COMPARISON")
-    print("=" * 80)
-
-    pm = portfolio
-    bl = baseline_result
-    print(f"\n  {'Metric':<25} {'Portfolio':<15} {'EURUSD Only':<15} {'Delta':<15}")
-    print(f"  {'-'*65}")
-    print(f"  {'CAGR':<25} {pm['cagr']*100:>13.2f}% {bl.cagr*100:>13.2f}% {(pm['cagr']-bl.cagr)*100:>+13.2f}%")
-    print(f"  {'Max Drawdown':<25} {pm['max_drawdown']*100:>13.2f}% {bl.max_drawdown*100:>13.2f}% {(pm['max_drawdown']-bl.max_drawdown)*100:>+13.2f}%")
-    print(f"  {'Sharpe':<25} {pm['sharpe']:>14.2f} {bl.sharpe_ratio:>14.2f} {pm['sharpe']-bl.sharpe_ratio:>+14.2f}")
-    print(f"  {'Sortino':<25} {pm['sortino']:>14.2f} {bl.sortino_ratio:>14.2f} {pm['sortino']-bl.sortino_ratio:>+14.2f}")
-    print(f"  {'Calmar':<25} {pm['calmar']:>14.2f} {bl.calmar_ratio:>14.2f} {pm['calmar']-bl.calmar_ratio:>+14.2f}")
-    print(f"  {'Profit Factor':<25} {pm['profit_factor']:>14.2f} {bl.profit_factor:>14.2f} {pm['profit_factor']-bl.profit_factor:>+14.2f}")
-    print(f"  {'Win Rate':<25} {pm['win_rate']*100:>13.1f}% {bl.win_rate*100:>13.1f}% {(pm['win_rate']-bl.win_rate)*100:>+13.1f}%")
-    print(f"  {'Total Trades':<25} {pm['total_trades']:>14} {bl.total_trades:>14}")
-    print("=" * 80)
-
-    # Reset
-    PAIR_CONFIGS['EURUSD']['base_lot_size'] = 0.0228
-    PAIR_CONFIGS['GBPUSD']['base_lot_size'] = 0.0228
+    for label, lot, mult, use_trend, comp_eq, bb, gs, sl in experiments:
+        config = make_aggressive_config(lot, mult, use_trend, comp_eq, bb, gs, sl)
+        bt = ProtectedGridBacktester(
+            initial_balance=total_capital, config=config,
+            spread_pips=0.7, slippage_pips=0.2,
+            pip_size=0.0001, pip_value_per_lot=10.0,
+        )
+        r = bt.run_backtest(data)
+        print(
+            f"  {label:>40} "
+            f"{r.cagr*100:>7.2f}% "
+            f"{r.max_drawdown*100:>7.2f}% "
+            f"${r.final_balance:>11.2f} "
+            f"{r.profit_factor:>8.2f} "
+            f"{r.sharpe_ratio:>8.2f} "
+            f"{r.total_trades:>8}"
+        )
 
 
 if __name__ == '__main__':
