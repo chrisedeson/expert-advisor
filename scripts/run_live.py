@@ -2,14 +2,17 @@
 """Entry point for the live trading engine.
 
 Usage:
-    # Paper trading (default) - conservative profile
-    python scripts/run_live.py
+    # Demo trading with cTrader (IC Markets)
+    python scripts/run_live.py --broker ctrader
 
-    # Paper trading - balanced profile
-    python scripts/run_live.py --profile balanced
+    # Paper trading with simulated broker (default)
+    python scripts/run_live.py --broker simulated
 
-    # Paper trading with custom capital
-    python scripts/run_live.py --profile conservative --capital 1000
+    # Demo trading - balanced profile
+    python scripts/run_live.py --broker ctrader --profile balanced
+
+    # Custom capital
+    python scripts/run_live.py --broker ctrader --profile conservative --capital 200
 
     # Show status
     python scripts/run_live.py --status
@@ -60,15 +63,30 @@ def list_profiles():
     print(f"Session: 12-16 UTC (London/NY overlap)")
 
 
+def create_broker(broker_type: str, capital: float, data_dir: str, is_live: bool = False):
+    """Create the appropriate broker instance."""
+    if broker_type == "ctrader":
+        from src.live.ctrader_broker import CTraderBroker
+        return CTraderBroker(is_live=is_live)
+    else:
+        return SimulatedBroker(
+            initial_balance=capital,
+            data_dir=data_dir,
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description='Expert Advisor Live Trading Engine')
+    parser.add_argument('--broker', type=str, default='simulated',
+                       choices=['simulated', 'ctrader'],
+                       help='Broker to use (default: simulated)')
     parser.add_argument('--profile', type=str, default='conservative',
                        choices=list(RISK_PROFILES.keys()),
                        help='Risk profile (default: conservative)')
     parser.add_argument('--capital', type=float, default=500.0,
                        help='Initial capital in USD (default: 500)')
-    parser.add_argument('--paper', action='store_true', default=True,
-                       help='Paper trading mode (default: True)')
+    parser.add_argument('--live', action='store_true', default=False,
+                       help='Use LIVE account (default: demo/paper)')
     parser.add_argument('--status', action='store_true',
                        help='Show current status and exit')
     parser.add_argument('--list-profiles', action='store_true',
@@ -87,20 +105,21 @@ def main():
     log_file = setup_logging()
     logger = logging.getLogger('main')
 
+    is_paper = args.broker == "simulated" or not args.live
+    broker_label = f"cTrader {'LIVE' if args.live else 'DEMO'}" if args.broker == "ctrader" else "Simulated"
+
     logger.info("=" * 60)
     logger.info("EXPERT ADVISOR - LIVE TRADING ENGINE")
     logger.info("=" * 60)
+    logger.info(f"Broker: {broker_label}")
     logger.info(f"Profile: {args.profile}")
     logger.info(f"Capital: ${args.capital}")
-    logger.info(f"Paper mode: {args.paper}")
+    logger.info(f"Paper mode: {is_paper}")
     logger.info(f"Log file: {log_file}")
     logger.info(f"State dir: {args.state_dir}")
 
     # Create broker
-    broker = SimulatedBroker(
-        initial_balance=args.capital,
-        data_dir=args.data_dir,
-    )
+    broker = create_broker(args.broker, args.capital, args.data_dir, args.live)
 
     # Create engine
     engine = LiveEngine(
@@ -108,7 +127,7 @@ def main():
         risk_profile=args.profile,
         initial_capital=args.capital,
         state_dir=args.state_dir,
-        paper_mode=args.paper,
+        paper_mode=is_paper,
     )
 
     if args.status:
@@ -121,7 +140,8 @@ def main():
         return
 
     # Start trading
-    print(f"\nStarting {args.profile} paper trading with ${args.capital}...")
+    print(f"\nStarting {args.profile} trading with ${args.capital}...")
+    print(f"Broker: {broker_label}")
     print(f"Instruments: {', '.join(INSTRUMENTS.keys())}")
     print(f"Session: 12-16 UTC only")
     print(f"Press Ctrl+C to stop\n")
