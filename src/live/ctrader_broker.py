@@ -196,10 +196,9 @@ class CTraderBroker(BrokerInterface):
         if step_volume > 0:
             volume = max(step_volume, (volume // step_volume) * step_volume)
 
-        # Convert prices to integer (multiply by 10^digits)
-        multiplier = 10 ** digits
-        sl_int = int(round(stop_loss * multiplier))
-        tp_int = int(round(take_profit * multiplier))
+        # Round prices to symbol's allowed digits
+        sl_rounded = round(stop_loss, digits)
+        tp_rounded = round(take_profit, digits)
 
         req = ProtoOANewOrderReq()
         req.ctidTraderAccountId = self.account_id
@@ -207,14 +206,14 @@ class CTraderBroker(BrokerInterface):
         req.orderType = ProtoOAOrderType.Value("MARKET")
         req.tradeSide = ProtoOATradeSide.Value("BUY" if direction == "BUY" else "SELL")
         req.volume = volume
-        req.stopLoss = float(stop_loss)
-        req.takeProfit = float(take_profit)
+        req.stopLoss = sl_rounded
+        req.takeProfit = tp_rounded
         if comment:
             req.comment = comment
 
         logger.info(
             f"Placing {direction} {symbol} vol={volume} "
-            f"SL={stop_loss:.5f} TP={take_profit:.5f}"
+            f"SL={sl_rounded} TP={tp_rounded}"
         )
 
         response = self._send_and_wait(req, timeout=10)
@@ -288,13 +287,19 @@ class CTraderBroker(BrokerInterface):
         """Modify SL/TP on an open position."""
         position_id = int(order_id)
 
+        # Look up symbol digits for price rounding
+        pos_data = self._positions.get(position_id, {})
+        symbol_id = pos_data.get("symbolId", 0)
+        details = self._symbol_details.get(symbol_id, {})
+        digits = details.get("digits", 5)
+
         req = ProtoOAAmendPositionSLTPReq()
         req.ctidTraderAccountId = self.account_id
         req.positionId = position_id
         if stop_loss is not None:
-            req.stopLoss = float(stop_loss)
+            req.stopLoss = round(stop_loss, digits)
         if take_profit is not None:
-            req.takeProfit = float(take_profit)
+            req.takeProfit = round(take_profit, digits)
 
         response = self._send_and_wait(req, timeout=5)
         if response is None:
