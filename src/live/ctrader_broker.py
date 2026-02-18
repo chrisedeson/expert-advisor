@@ -200,14 +200,14 @@ class CTraderBroker(BrokerInterface):
         sl_rounded = round(stop_loss, digits)
         tp_rounded = round(take_profit, digits)
 
+        # cTrader: market orders can't have absolute SL/TP inline
+        # Place order first, then modify to add SL/TP
         req = ProtoOANewOrderReq()
         req.ctidTraderAccountId = self.account_id
         req.symbolId = symbol_id
         req.orderType = ProtoOAOrderType.Value("MARKET")
         req.tradeSide = ProtoOATradeSide.Value("BUY" if direction == "BUY" else "SELL")
         req.volume = volume
-        req.stopLoss = sl_rounded
-        req.takeProfit = tp_rounded
         if comment:
             req.comment = comment
 
@@ -221,25 +221,38 @@ class CTraderBroker(BrokerInterface):
             return OrderResult(success=False, error="Order timeout")
 
         result = Protobuf.extract(response)
+        position_id = None
+        fill_price = None
+
         if hasattr(result, "position"):
             pos = result.position
+            position_id = pos.positionId
             fill_price = pos.price / (10 ** digits) if hasattr(pos, "price") else None
-            return OrderResult(
-                success=True,
-                order_id=str(pos.positionId),
-                fill_price=fill_price,
-            )
         elif hasattr(result, "order"):
             order = result.order
-            return OrderResult(
-                success=True,
-                order_id=str(order.orderId),
-                fill_price=order.executionPrice / (10 ** digits) if hasattr(order, "executionPrice") else None,
-            )
+            position_id = order.positionId if hasattr(order, "positionId") else None
+            fill_price = order.executionPrice / (10 ** digits) if hasattr(order, "executionPrice") else None
         elif hasattr(result, "errorCode"):
             return OrderResult(success=False, error=f"Error {result.errorCode}: {getattr(result, 'description', '')}")
 
-        return OrderResult(success=True, order_id="unknown")
+        if position_id is None:
+            return OrderResult(success=False, error="No position ID in fill response")
+
+        # Now add SL/TP via modify
+        logger.info(f"Setting SL/TP on position {position_id}: SL={sl_rounded} TP={tp_rounded}")
+        modify_result = self.modify_position(
+            str(position_id),
+            stop_loss=sl_rounded,
+            take_profit=tp_rounded,
+        )
+        if not modify_result.success:
+            logger.warning(f"SL/TP modify failed: {modify_result.error} (position {position_id} still open)")
+
+        return OrderResult(
+            success=True,
+            order_id=str(position_id),
+            fill_price=fill_price,
+        )
 
     def close_position(self, order_id: str) -> OrderResult:
         """Close a position by ID."""

@@ -35,6 +35,7 @@ venv.bak/
 # IDE
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
@@ -89,7 +90,5 @@ htmlcov/
 
 # Docs
 *.md
-!JOURNAL.md
 !README.md
-!CLAUDE.md
 *.txt
