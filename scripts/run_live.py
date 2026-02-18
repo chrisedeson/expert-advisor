@@ -31,7 +31,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / 'src'))
 
-from src.live import LiveEngine, SimulatedBroker, RISK_PROFILES, INSTRUMENTS
+from src.live import LiveEngine, SimulatedBroker, RISK_PROFILES, INSTRUMENTS, TelegramNotifier
 
 
 def setup_logging(log_dir: str = "logs"):
@@ -95,6 +95,8 @@ def main():
                        help='Directory for state persistence')
     parser.add_argument('--data-dir', type=str, default='data/processed',
                        help='Directory for price data')
+    parser.add_argument('--no-notify', action='store_true', default=False,
+                       help='Disable Telegram notifications')
 
     args = parser.parse_args()
 
@@ -121,6 +123,16 @@ def main():
     # Create broker
     broker = create_broker(args.broker, args.capital, args.data_dir, args.live)
 
+    # Create notifier
+    notifier = None
+    if not args.no_notify:
+        notifier = TelegramNotifier()
+        if notifier.enabled:
+            logger.info("Telegram notifications: ENABLED")
+        else:
+            logger.info("Telegram notifications: DISABLED (missing env vars)")
+            notifier = None
+
     # Create engine
     engine = LiveEngine(
         broker=broker,
@@ -128,6 +140,7 @@ def main():
         initial_capital=args.capital,
         state_dir=args.state_dir,
         paper_mode=is_paper,
+        notifier=notifier,
     )
 
     if args.status:

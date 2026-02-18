@@ -41,3 +41,8 @@ pytest-mock==3.11.1
 # Jupyter notebooks
 jupyter==1.0.0
 ipykernel==6.24.0
+
+# Live trading - cTrader Open API
+ctrader-open-api>=0.10.0
+twisted>=23.0.0
+requests>=2.31.0

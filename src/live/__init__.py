@@ -7,6 +7,7 @@ Modules:
 - simulated_broker: Paper trading broker
 - session_filter: 12-16 UTC session filter
 - state_manager: State persistence
+- notifier: Telegram notifications
 """
 from .signal_engine import SignalEngine, Signal, Position
 from .live_engine import LiveEngine, INSTRUMENTS, RISK_PROFILES
@@ -14,10 +15,12 @@ from .broker_interface import BrokerInterface
 from .simulated_broker import SimulatedBroker
 from .session_filter import SessionFilter
 from .state_manager import StateManager
+from .notifier import TelegramNotifier
 
 __all__ = [
     'SignalEngine', 'Signal', 'Position',
     'LiveEngine', 'INSTRUMENTS', 'RISK_PROFILES',
     'BrokerInterface', 'SimulatedBroker',
     'SessionFilter', 'StateManager',
+    'TelegramNotifier',
 ]

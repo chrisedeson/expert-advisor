@@ -57,9 +57,11 @@ class LiveEngine:
         initial_capital: float = 500.0,
         state_dir: str = "state",
         paper_mode: bool = True,
+        notifier=None,
     ):
         self.broker = broker
         self.paper_mode = paper_mode
+        self.notifier = notifier
         self.initial_capital = initial_capital
         self.state_dir = Path(state_dir)
 
@@ -103,6 +105,15 @@ class LiveEngine:
         self.total_trades_opened = 0
         self.total_trades_closed = 0
 
+    def _notify(self, method: str, *args, **kwargs):
+        """Safely call a notifier method (fail-silent)."""
+        if self.notifier is None:
+            return
+        try:
+            getattr(self.notifier, method)(*args, **kwargs)
+        except Exception as e:
+            logger.debug(f"Notification failed ({method}): {e}")
+
     def start(self):
         """Start the live trading loop."""
         logger.info(f"Starting live engine: profile={self.risk_profile_name}, "
@@ -113,6 +124,7 @@ class LiveEngine:
 
         if not self.broker.connect():
             logger.error("Failed to connect to broker")
+            self._notify('send_error', "Failed to connect to broker")
             return
 
         # Try to restore state
@@ -121,12 +133,17 @@ class LiveEngine:
         self.running = True
         logger.info("Engine started. Waiting for session...")
 
+        broker_name = type(self.broker).__name__
+        self._notify('send_startup', self.risk_profile_name, self.initial_capital,
+                     broker_name, list(self.allocation.keys()))
+
         try:
             self._main_loop()
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt received")
         except Exception as e:
             logger.exception(f"Engine error: {e}")
+            self._notify('send_error', f"Engine crashed: {e}")
         finally:
             self._save_state()
             self.broker.disconnect()
@@ -256,8 +273,13 @@ class LiveEngine:
 
             logger.info(f"OPENED: {signal.direction} {symbol} @ {result.fill_price:.5f}, "
                          f"id={result.order_id}")
+
+            self._notify('send_trade_opened', symbol, signal.direction,
+                         result.fill_price or signal.entry_price, lot_size,
+                         signal.stop_loss, signal.take_profit, signal.grid_level)
         else:
             logger.error(f"ORDER FAILED: {symbol} {signal.direction} - {result.error}")
+            self._notify('send_error', f"Order failed: {signal.direction} {symbol} - {result.error}")
 
     def _close_position_from_signal(self, symbol: str, exit_info: Dict, spec: Dict):
         """Close a position based on signal engine exit."""
@@ -280,6 +302,9 @@ class LiveEngine:
                 logger.info(f"CLOSED: {pos.direction} {symbol} @ {exit_price:.5f}, "
                              f"reason={reason}, pips={pips:.1f}, P&L=${net_pnl:.2f}")
 
+                self._notify('send_trade_closed', symbol, pos.direction,
+                             exit_price, reason, pips, net_pnl)
+
                 self.state_manager.save_trade_log({
                     'event': 'CLOSE', 'symbol': symbol, 'direction': pos.direction,
                     'entry_price': pos.entry_price, 'exit_price': exit_price,
@@ -291,6 +316,7 @@ class LiveEngine:
                 self.total_trades_closed += 1
             else:
                 logger.error(f"CLOSE FAILED: {symbol} {pos.order_id} - {result.error}")
+                self._notify('send_error', f"Close failed: {symbol} {pos.order_id} - {result.error}")
                 return
 
         if pos in self.positions[symbol]:

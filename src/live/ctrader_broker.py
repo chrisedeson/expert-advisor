@@ -227,11 +227,11 @@ class CTraderBroker(BrokerInterface):
         if hasattr(result, "position"):
             pos = result.position
             position_id = pos.positionId
-            fill_price = pos.price / (10 ** digits) if hasattr(pos, "price") else None
+            fill_price = round(pos.price / 100000.0, digits) if hasattr(pos, "price") else None
         elif hasattr(result, "order"):
             order = result.order
             position_id = order.positionId if hasattr(order, "positionId") else None
-            fill_price = order.executionPrice / (10 ** digits) if hasattr(order, "executionPrice") else None
+            fill_price = round(order.executionPrice / 100000.0, digits) if hasattr(order, "executionPrice") else None
         elif hasattr(result, "errorCode"):
             return OrderResult(success=False, error=f"Error {result.errorCode}: {getattr(result, 'description', '')}")
 
@@ -287,7 +287,7 @@ class CTraderBroker(BrokerInterface):
         if hasattr(result, "position") and hasattr(result.position, "price"):
             details = self._symbol_details.get(pos_data.get("symbolId", 0), {})
             digits = details.get("digits", 5)
-            fill_price = result.position.price / (10 ** digits)
+            fill_price = round(result.position.price / 100000.0, digits)
 
         return OrderResult(success=True, order_id=order_id, fill_price=fill_price)
 
@@ -373,13 +373,18 @@ class CTraderBroker(BrokerInterface):
             return None
 
         # Parse trendbars (delta-encoded)
+        # cTrader trendbar prices are ALWAYS in relative format divided by 100000,
+        # then rounded to symbol digits. See: https://help.ctrader.com/open-api/symbol-data/
         rows = []
-        pipette_divisor = 10 ** digits
         for bar in result.trendbar:
-            low = bar.low / pipette_divisor if bar.low != 0 else 0
-            open_ = low + (bar.deltaOpen / pipette_divisor if bar.deltaOpen else 0)
-            high = low + (bar.deltaHigh / pipette_divisor if bar.deltaHigh else 0)
-            close = low + (bar.deltaClose / pipette_divisor if bar.deltaClose else 0)
+            raw_low = bar.low
+            raw_open = raw_low + (bar.deltaOpen if bar.deltaOpen else 0)
+            raw_high = raw_low + (bar.deltaHigh if bar.deltaHigh else 0)
+            raw_close = raw_low + (bar.deltaClose if bar.deltaClose else 0)
+            low = round(raw_low / 100000.0, digits)
+            open_ = round(raw_open / 100000.0, digits)
+            high = round(raw_high / 100000.0, digits)
+            close = round(raw_close / 100000.0, digits)
             volume = bar.volume if hasattr(bar, "volume") else 0
             ts = datetime.fromtimestamp(
                 bar.utcTimestampInMinutes * 60, tz=timezone.utc
@@ -474,17 +479,17 @@ class CTraderBroker(BrokerInterface):
             msg_type = type(result).__name__
 
             # Spot price updates
+            # cTrader prices are always relative / 100000, rounded to digits
             if msg_type == "ProtoOASpotEvent":
                 sid = result.symbolId
                 details = self._symbol_details.get(sid, {})
                 digits = details.get("digits", 5)
-                divisor = 10 ** digits
                 if sid not in self._spot_prices:
                     self._spot_prices[sid] = {}
                 if result.HasField("bid"):
-                    self._spot_prices[sid]["bid"] = result.bid / divisor
+                    self._spot_prices[sid]["bid"] = round(result.bid / 100000.0, digits)
                 if result.HasField("ask"):
-                    self._spot_prices[sid]["ask"] = result.ask / divisor
+                    self._spot_prices[sid]["ask"] = round(result.ask / 100000.0, digits)
 
             # Execution events (order fills, closes)
             elif msg_type == "ProtoOAExecutionEvent":
