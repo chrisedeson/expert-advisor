@@ -105,6 +105,10 @@ class LiveEngine:
         self.total_trades_opened = 0
         self.total_trades_closed = 0
 
+        # Session notification tracking (send once per day)
+        self._session_start_date: Optional[str] = None
+        self._session_end_date: Optional[str] = None
+
     def _notify(self, method: str, *args, **kwargs):
         """Safely call a notifier method (fail-silent)."""
         if self.notifier is None:
@@ -159,8 +163,10 @@ class LiveEngine:
             now = datetime.now(timezone.utc)
 
             if self.session.is_active(now):
+                self._send_session_start(now)
                 self._trading_tick(now)
             else:
+                self._send_session_end(now)
                 next_session = self.session.next_session_start(now)
                 wait_mins = (next_session - now).total_seconds() / 60
                 if wait_mins > 5:
@@ -348,6 +354,57 @@ class LiveEngine:
                 self._close_position_from_signal(symbol, exit_info, spec)
 
             engine.update_trailing_stops(self.positions[symbol], current_bar)
+
+    def _send_session_start(self, now: datetime):
+        """Send session start notification (once per day)."""
+        today = now.strftime('%Y-%m-%d')
+        if self._session_start_date == today:
+            return
+        self._session_start_date = today
+
+        account = self.broker.get_account_info()
+        open_count = sum(len(v) for v in self.positions.values())
+        pos_detail = {s: len(p) for s, p in self.positions.items() if len(p) > 0}
+
+        msg = (
+            f"\U0001f514 <b>SESSION OPEN</b> ({today})\n"
+            f"Balance: ${account.balance:.2f}\n"
+            f"Equity: ${account.equity:.2f}\n"
+            f"Open positions: {open_count}"
+        )
+        if pos_detail:
+            msg += "\n" + ", ".join(f"{s}: {n}" for s, n in pos_detail.items())
+        self._notify('send', msg)
+        logger.info(f"Session start: balance=${account.balance:.2f}, equity=${account.equity:.2f}, "
+                     f"{open_count} open positions")
+
+    def _send_session_end(self, now: datetime):
+        """Send session end summary (once per day)."""
+        today = now.strftime('%Y-%m-%d')
+        if self._session_end_date == today:
+            return
+        # Only send if we had a session start today (avoid sending on first boot outside session)
+        if self._session_start_date != today:
+            return
+        self._session_end_date = today
+
+        account = self.broker.get_account_info()
+        open_count = sum(len(v) for v in self.positions.values())
+        pos_detail = {s: len(p) for s, p in self.positions.items() if len(p) > 0}
+
+        msg = (
+            f"\U0001f4ca <b>SESSION CLOSED</b> ({today})\n"
+            f"Balance: ${account.balance:.2f}\n"
+            f"Equity: ${account.equity:.2f}\n"
+            f"Open positions: {open_count}\n"
+            f"Total signals: {self.total_signals}\n"
+            f"Trades opened: {self.total_trades_opened}\n"
+            f"Trades closed: {self.total_trades_closed}"
+        )
+        if pos_detail:
+            msg += "\nPositions: " + ", ".join(f"{s}: {n}" for s, n in pos_detail.items())
+        self._notify('send', msg)
+        logger.info(f"Session end: balance=${account.balance:.2f}, equity=${account.equity:.2f}")
 
     def _check_cooldown(self, symbol: str, direction: str, now: datetime) -> bool:
         """Check if enough time has passed since last entry."""
