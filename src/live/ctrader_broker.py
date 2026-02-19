@@ -338,6 +338,18 @@ class CTraderBroker(BrokerInterface):
         count: int = 250,
     ) -> Optional[pd.DataFrame]:
         """Get historical candles from cTrader."""
+        # Wait for connection if disconnected (auto-reconnect in progress)
+        if not self._connected.is_set():
+            logger.warning(f"Connection lost, waiting for reconnect...")
+            if not self._connected.wait(timeout=30):
+                logger.error("Reconnect timeout - no connection")
+                return None
+            # Wait for auth after reconnect
+            if not self._authenticated.wait(timeout=15):
+                logger.error("Re-authentication timeout")
+                return None
+            logger.info("Reconnected successfully")
+
         symbol_id = self._symbol_map.get(symbol)
         if not symbol_id:
             logger.warning(f"Unknown symbol for candles: {symbol}")
@@ -467,10 +479,19 @@ class CTraderBroker(BrokerInterface):
         self._authenticated.set()
 
     def _on_disconnected(self, client, reason):
-        """Handle disconnection."""
+        """Handle disconnection - attempt automatic reconnect."""
         logger.warning(f"Disconnected: {reason}")
         self._connected.clear()
         self._authenticated.clear()
+        # Auto-reconnect after a brief delay
+        def _reconnect():
+            time.sleep(5)
+            logger.info("Attempting auto-reconnect...")
+            try:
+                reactor.callFromThread(self.client.startService)
+            except Exception as e:
+                logger.error(f"Reconnect failed: {e}")
+        threading.Thread(target=_reconnect, daemon=True).start()
 
     def _on_message(self, client, msg):
         """Handle all incoming messages."""

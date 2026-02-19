@@ -166,35 +166,27 @@ class LiveEngine:
             if self.session.is_active(now):
                 self._send_session_start(now)
                 self._trading_tick(now)
-            else:
-                self._send_session_end(now)
-                next_session = self.session.next_session_start(now)
-                wait_mins = (next_session - now).total_seconds() / 60
-                if wait_mins > 5:
-                    logger.info(f"Outside session. Next: {next_session.strftime('%Y-%m-%d %H:%M UTC')} "
-                                 f"({wait_mins:.0f} min)")
-                    # Sleep longer when far from session
-                    time.sleep(min(300, wait_mins * 30))
-                    continue
-
-            # Always check for SL/TP hits on existing positions
-            self._check_position_exits(now)
-
-            # Save state periodically
-            self._save_state()
-
-            # Sleep until next check (60s during session, 300s outside)
-            if self.session.is_active(now):
+                # Check for SL/TP hits on existing positions
+                self._check_position_exits(now)
+                # Save state every tick during session
+                self._save_state()
                 time.sleep(60)
             else:
-                time.sleep(300)
+                self._send_session_end(now)
+                # Save state once when session ends
+                self._save_state()
+                next_session = self.session.next_session_start(now)
+                wait_mins = (next_session - now).total_seconds() / 60
+                logger.info(f"Outside session. Next: {next_session.strftime('%Y-%m-%d %H:%M UTC')} "
+                             f"({wait_mins:.0f} min)")
+                time.sleep(min(300, max(60, wait_mins * 30)))
 
     def _trading_tick(self, now: datetime):
         """One trading tick: check signals and manage positions."""
-        # Heartbeat: log prices every 15 minutes so we know it's alive
+        # Heartbeat: log prices + BB diagnostics every 15 minutes
         do_heartbeat = (self._last_heartbeat is None or
                         (now - self._last_heartbeat).total_seconds() >= 900)
-        heartbeat_prices = []
+        heartbeat_lines = []
 
         for symbol, weight in self.allocation.items():
             if weight <= 0:
@@ -208,13 +200,37 @@ class LiveEngine:
             if candles is None or len(candles) < 200:
                 logger.warning(f"{symbol}: insufficient data ({len(candles) if candles is not None else 0} bars)")
                 if do_heartbeat:
-                    heartbeat_prices.append(f"{symbol}: NO DATA")
+                    heartbeat_lines.append(f"{symbol}: NO DATA")
                 continue
 
             current_bar = candles.iloc[-1]
 
+            # Build diagnostic info at heartbeat intervals
             if do_heartbeat:
-                heartbeat_prices.append(f"{symbol}={current_bar['close']:.5f}")
+                close = current_bar['close']
+                atr = current_bar.get('atr', 0)
+                close_prices = candles['close']
+                sma50 = close_prices.rolling(50).mean().iloc[-1]
+                sma200 = close_prices.rolling(200).mean().iloc[-1]
+                std50 = close_prices.rolling(50).std().iloc[-1]
+                if not pd.isna(sma50) and not pd.isna(std50) and std50 > 0:
+                    upper_bb = sma50 + 2.0 * std50
+                    lower_bb = sma50 - 2.0 * std50
+                    trend = "UP" if sma50 > sma200 else "DN"
+                    # Distance to nearest band as % of band width
+                    band_width = upper_bb - lower_bb
+                    dist_lower = (close - lower_bb) / band_width * 100
+                    dist_upper = (upper_bb - close) / band_width * 100
+                    # Show which side is actionable
+                    if trend == "UP":
+                        near = f"{dist_lower:.0f}% from buy"
+                    else:
+                        near = f"{dist_upper:.0f}% from sell"
+                    heartbeat_lines.append(
+                        f"{symbol} {close:.5f} [{trend}] {near}"
+                    )
+                else:
+                    heartbeat_lines.append(f"{symbol} {close:.5f} [calc err]")
 
             # Check exits on existing positions
             exits = engine.check_exits(self.positions[symbol], current_bar, spec['pip_size'])
@@ -235,15 +251,23 @@ class LiveEngine:
 
             if signal:
                 self.total_signals += 1
+                logger.info(f"SIGNAL: {signal.direction} {symbol} @ {signal.entry_price:.5f}")
                 if self._check_cooldown(symbol, signal.direction, now):
                     self._execute_signal(symbol, signal, spec, weight)
+                else:
+                    logger.info(f"COOLDOWN: {symbol} {signal.direction} blocked (< 1h since last)")
 
         # Heartbeat log + Telegram every 15 min
-        if do_heartbeat and heartbeat_prices:
+        if do_heartbeat and heartbeat_lines:
             open_count = sum(len(v) for v in self.positions.values())
-            prices_str = " | ".join(heartbeat_prices)
-            logger.info(f"HEARTBEAT: {prices_str} | positions={open_count} | signals={self.total_signals}")
-            self._notify('send', f"\U0001f493 <b>HEARTBEAT</b> ({now.strftime('%H:%M UTC')})\n{prices_str}\nOpen: {open_count} | Signals: {self.total_signals}")
+            log_str = " | ".join(heartbeat_lines)
+            logger.info(f"HEARTBEAT: {log_str} | pos={open_count} | sig={self.total_signals}")
+            # Telegram: one line per instrument for readability
+            tg_lines = "\n".join(heartbeat_lines)
+            self._notify('send',
+                f"\U0001f493 <b>HEARTBEAT</b> ({now.strftime('%H:%M UTC')})\n"
+                f"{tg_lines}\n"
+                f"Open: {open_count} | Signals: {self.total_signals}")
             self._last_heartbeat = now
 
     def _execute_signal(self, symbol: str, signal: Signal, spec: Dict, weight: float):
