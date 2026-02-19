@@ -108,6 +108,7 @@ class LiveEngine:
         # Session notification tracking (send once per day)
         self._session_start_date: Optional[str] = None
         self._session_end_date: Optional[str] = None
+        self._last_heartbeat: Optional[datetime] = None
 
     def _notify(self, method: str, *args, **kwargs):
         """Safely call a notifier method (fail-silent)."""
@@ -190,6 +191,11 @@ class LiveEngine:
 
     def _trading_tick(self, now: datetime):
         """One trading tick: check signals and manage positions."""
+        # Heartbeat: log prices every 15 minutes so we know it's alive
+        do_heartbeat = (self._last_heartbeat is None or
+                        (now - self._last_heartbeat).total_seconds() >= 900)
+        heartbeat_prices = []
+
         for symbol, weight in self.allocation.items():
             if weight <= 0:
                 continue
@@ -201,9 +207,14 @@ class LiveEngine:
             candles = self.broker.get_candles(symbol, "H1", count=250)
             if candles is None or len(candles) < 200:
                 logger.warning(f"{symbol}: insufficient data ({len(candles) if candles is not None else 0} bars)")
+                if do_heartbeat:
+                    heartbeat_prices.append(f"{symbol}: NO DATA")
                 continue
 
             current_bar = candles.iloc[-1]
+
+            if do_heartbeat:
+                heartbeat_prices.append(f"{symbol}={current_bar['close']:.5f}")
 
             # Check exits on existing positions
             exits = engine.check_exits(self.positions[symbol], current_bar, spec['pip_size'])
@@ -226,6 +237,14 @@ class LiveEngine:
                 self.total_signals += 1
                 if self._check_cooldown(symbol, signal.direction, now):
                     self._execute_signal(symbol, signal, spec, weight)
+
+        # Heartbeat log + Telegram every 15 min
+        if do_heartbeat and heartbeat_prices:
+            open_count = sum(len(v) for v in self.positions.values())
+            prices_str = " | ".join(heartbeat_prices)
+            logger.info(f"HEARTBEAT: {prices_str} | positions={open_count} | signals={self.total_signals}")
+            self._notify('send', f"\U0001f493 <b>HEARTBEAT</b> ({now.strftime('%H:%M UTC')})\n{prices_str}\nOpen: {open_count} | Signals: {self.total_signals}")
+            self._last_heartbeat = now
 
     def _execute_signal(self, symbol: str, signal: Signal, spec: Dict, weight: float):
         """Execute a trading signal."""
