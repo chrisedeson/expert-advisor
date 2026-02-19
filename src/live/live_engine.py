@@ -185,7 +185,7 @@ class LiveEngine:
         """One trading tick: check signals and manage positions."""
         # Heartbeat: log prices + BB diagnostics every 15 minutes
         do_heartbeat = (self._last_heartbeat is None or
-                        (now - self._last_heartbeat).total_seconds() >= 900)
+                        (now - self._last_heartbeat).total_seconds() >= 3600)
         heartbeat_lines = []
 
         for symbol, weight in self.allocation.items():
