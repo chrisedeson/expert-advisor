@@ -299,14 +299,25 @@ class CTraderBroker(BrokerInterface):
             return OrderResult(success=False, error="Close timeout")
 
         result = Protobuf.extract(response)
-        if hasattr(result, "errorCode"):
-            return OrderResult(success=False, error=f"Error: {result.errorCode}")
+        msg_type = type(result).__name__
+
+        # Check for error response
+        if msg_type == "ProtoOAErrorRes" or (hasattr(result, "errorCode") and str(result.errorCode)):
+            error_code = str(getattr(result, "errorCode", ""))
+            description = str(getattr(result, "description", ""))
+            error_msg = f"{error_code} {description}".strip()
+            # Include POSITION_NOT_FOUND in error for upstream handling
+            if "NOT_FOUND" in error_code or "NOT_FOUND" in description:
+                return OrderResult(success=False, error=f"POSITION_NOT_FOUND")
+            if error_msg:
+                return OrderResult(success=False, error=f"Error: {error_msg}")
 
         fill_price = None
         if hasattr(result, "position") and hasattr(result.position, "price"):
             details = self._symbol_details.get(pos_data.get("symbolId", 0), {})
             digits = details.get("digits", 5)
-            fill_price = round(result.position.price / 100000.0, digits)
+            if result.position.price > 0:
+                fill_price = round(result.position.price / 100000.0, digits)
 
         return OrderResult(success=True, order_id=order_id, fill_price=fill_price)
 
