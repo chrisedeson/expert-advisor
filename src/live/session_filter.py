@@ -18,7 +18,7 @@ class SessionFilter:
         # Weekday check: Mon=0, Sun=6
         if dt.weekday() >= 5:
             return False
-        return self.start_hour <= dt.hour <= self.end_hour
+        return self.start_hour <= dt.hour < self.end_hour
 
     def next_session_start(self, dt: datetime = None) -> datetime:
         """Return the next session start time."""

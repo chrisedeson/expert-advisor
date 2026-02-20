@@ -250,12 +250,10 @@ class LiveEngine:
             )
 
             if signal:
-                self.total_signals += 1
-                logger.info(f"SIGNAL: {signal.direction} {symbol} @ {signal.entry_price:.5f}")
                 if self._check_cooldown(symbol, signal.direction, now):
+                    self.total_signals += 1
+                    logger.info(f"SIGNAL: {signal.direction} {symbol} @ {signal.entry_price:.5f}")
                     self._execute_signal(symbol, signal, spec, weight)
-                else:
-                    logger.info(f"COOLDOWN: {symbol} {signal.direction} blocked (< 1h since last)")
 
         # Heartbeat log + Telegram every 15 min
         if do_heartbeat and heartbeat_lines:

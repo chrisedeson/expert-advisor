@@ -312,12 +312,21 @@ class CTraderBroker(BrokerInterface):
             if error_msg:
                 return OrderResult(success=False, error=f"Error: {error_msg}")
 
+        # Get fill price from spot (result.position.price is unreliable for closes)
         fill_price = None
-        if hasattr(result, "position") and hasattr(result.position, "price"):
-            details = self._symbol_details.get(pos_data.get("symbolId", 0), {})
-            digits = details.get("digits", 5)
-            if result.position.price > 0:
-                fill_price = round(result.position.price / 100000.0, digits)
+        symbol_id = pos_data.get("symbolId", 0)
+        spot = self._spot_prices.get(symbol_id, {})
+        # For a close: SELL close = buy back (ask), BUY close = sell (bid)
+        direction = pos_data.get("direction", "")
+        if direction == "BUY" and "bid" in spot:
+            fill_price = spot["bid"]
+        elif direction == "SELL" and "ask" in spot:
+            fill_price = spot["ask"]
+        elif "bid" in spot:
+            fill_price = spot["bid"]
+
+        if fill_price:
+            logger.info(f"Close fill price (from spot): {fill_price}")
 
         return OrderResult(success=True, order_id=order_id, fill_price=fill_price)
 
