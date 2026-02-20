@@ -227,16 +227,35 @@ class CTraderBroker(BrokerInterface):
         if hasattr(result, "position"):
             pos = result.position
             position_id = pos.positionId
-            fill_price = round(pos.price / 100000.0, digits) if hasattr(pos, "price") else None
+            # Try price field, also check tradeData for rate
+            if hasattr(pos, "price") and pos.price > 0:
+                fill_price = round(pos.price / 100000.0, digits)
+            if hasattr(pos, "tradeData"):
+                td = pos.tradeData
+                logger.info(f"Fill tradeData: symbolId={td.symbolId}, volume={td.volume}, "
+                            f"tradeSide={td.tradeSide}")
         elif hasattr(result, "order"):
             order = result.order
             position_id = order.positionId if hasattr(order, "positionId") else None
-            fill_price = round(order.executionPrice / 100000.0, digits) if hasattr(order, "executionPrice") else None
+            if hasattr(order, "executionPrice") and order.executionPrice > 0:
+                fill_price = round(order.executionPrice / 100000.0, digits)
+            logger.info(f"Fill via order: positionId={position_id}, "
+                        f"execPrice={getattr(order, 'executionPrice', 'N/A')}")
         elif hasattr(result, "errorCode"):
             return OrderResult(success=False, error=f"Error {result.errorCode}: {getattr(result, 'description', '')}")
 
         if position_id is None:
             return OrderResult(success=False, error="No position ID in fill response")
+
+        # If fill price still unknown, use current spot as estimate
+        if not fill_price:
+            spot = self._spot_prices.get(symbol_id, {})
+            if direction == "BUY" and "ask" in spot:
+                fill_price = spot["ask"]
+            elif "bid" in spot:
+                fill_price = spot["bid"]
+            if fill_price:
+                logger.info(f"Using spot price as fill estimate: {fill_price}")
 
         # Now add SL/TP via modify
         logger.info(f"Setting SL/TP on position {position_id}: SL={sl_rounded} TP={tp_rounded}")

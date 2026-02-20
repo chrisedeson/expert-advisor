@@ -320,11 +320,12 @@ class LiveEngine:
                 'order_id': result.order_id, 'time': datetime.now(timezone.utc).isoformat(),
             }, str(self.state_dir / "trade_log.jsonl"))
 
-            logger.info(f"OPENED: {signal.direction} {symbol} @ {result.fill_price:.5f}, "
+            actual_price = result.fill_price or signal.entry_price
+            logger.info(f"OPENED: {signal.direction} {symbol} @ {actual_price:.5f}, "
                          f"id={result.order_id}")
 
             self._notify('send_trade_opened', symbol, signal.direction,
-                         result.fill_price or signal.entry_price, lot_size,
+                         actual_price, lot_size,
                          signal.stop_loss, signal.take_profit, signal.grid_level)
         else:
             logger.error(f"ORDER FAILED: {symbol} {signal.direction} - {result.error}")
@@ -358,6 +359,32 @@ class LiveEngine:
                     'event': 'CLOSE', 'symbol': symbol, 'direction': pos.direction,
                     'entry_price': pos.entry_price, 'exit_price': exit_price,
                     'reason': reason, 'pips': pips, 'net_pnl': net_pnl,
+                    'lot': pos.lot_size, 'order_id': pos.order_id,
+                    'time': datetime.now(timezone.utc).isoformat(),
+                }, str(self.state_dir / "trade_log.jsonl"))
+
+                self.total_trades_closed += 1
+            elif "POSITION_NOT_FOUND" in str(result.error):
+                # Broker already closed this (SL/TP executed on broker side)
+                exit_price = exit_info['exit_price']
+                pip_size = spec['pip_size']
+                pip_value = spec['pip_value']
+                if pos.direction == 'BUY':
+                    pips = (exit_price - pos.entry_price) / pip_size
+                else:
+                    pips = (pos.entry_price - exit_price) / pip_size
+                net_pnl = pips * pip_value * pos.lot_size
+
+                logger.info(f"BROKER-CLOSED: {pos.direction} {symbol} @ ~{exit_price:.5f}, "
+                             f"reason={reason} (broker-side), pips~{pips:.1f}, P&L~${net_pnl:.2f}")
+
+                self._notify('send_trade_closed', symbol, pos.direction,
+                             exit_price, f"{reason} (broker)", pips, net_pnl)
+
+                self.state_manager.save_trade_log({
+                    'event': 'CLOSE', 'symbol': symbol, 'direction': pos.direction,
+                    'entry_price': pos.entry_price, 'exit_price': exit_price,
+                    'reason': f'{reason} (broker-side)', 'pips': pips, 'net_pnl': net_pnl,
                     'lot': pos.lot_size, 'order_id': pos.order_id,
                     'time': datetime.now(timezone.utc).isoformat(),
                 }, str(self.state_dir / "trade_log.jsonl"))
