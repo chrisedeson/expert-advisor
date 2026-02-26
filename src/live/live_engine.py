@@ -127,6 +127,10 @@ class LiveEngine:
         logger.info(f"Base lot: {self.profile['base_lot']}, Mult: {self.profile['mult']}")
         logger.info(f"Session: 12-16 UTC (London/NY overlap)")
 
+        # Wire up auth failure alerts if broker supports it
+        if hasattr(self.broker, '_auth_failure_callback'):
+            self.broker._auth_failure_callback = lambda msg: self._notify('send_error', f"AUTH FAILURE: {msg}")
+
         if not self.broker.connect():
             logger.error("Failed to connect to broker")
             self._notify('send_error', "Failed to connect to broker")

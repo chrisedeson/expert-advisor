@@ -105,6 +105,8 @@ class CTraderBroker(BrokerInterface):
         self._reactor_thread = None
         self._balance = 0.0
         self._equity = 0.0
+        self._last_token_refresh = 0  # epoch timestamp of last refresh attempt
+        self._auth_failure_callback = None  # optional callback for auth failures
 
         # Callbacks
         self.client.setConnectedCallback(self._on_connected)
@@ -419,6 +421,9 @@ class CTraderBroker(BrokerInterface):
             return None
 
         result = Protobuf.extract(response)
+        if hasattr(result, "errorCode"):
+            logger.error(f"Candle request error for {symbol}: {result.errorCode} - {getattr(result, 'description', '')}")
+            return None
         if not hasattr(result, "trendbar") or len(result.trendbar) == 0:
             logger.warning(f"No candle data for {symbol}")
             return None
@@ -607,9 +612,12 @@ class CTraderBroker(BrokerInterface):
 
             # Error response
             elif msg_type == "ProtoOAErrorRes":
-                logger.error(f"cTrader error: {result.errorCode} - {getattr(result, 'description', '')}")
-                # Check if token expired
-                if "INVALID_ACCESS_TOKEN" in str(getattr(result, "errorCode", "")):
+                error_code = str(getattr(result, "errorCode", ""))
+                description = str(getattr(result, "description", ""))
+                logger.error(f"cTrader error: {error_code} - {description}")
+                # Check if token expired or account not authorized
+                if ("INVALID_ACCESS_TOKEN" in error_code or
+                    ("INVALID_REQUEST" in error_code and "not authorized" in description.lower())):
                     self._refresh_access_token()
 
         except Exception as e:
@@ -700,8 +708,16 @@ class CTraderBroker(BrokerInterface):
 
     def _refresh_access_token(self):
         """Refresh the access token using the refresh token."""
+        # Cooldown: don't retry more than once every 60 seconds
+        now = time.time()
+        if now - self._last_token_refresh < 60:
+            return
+        self._last_token_refresh = now
+
         if not self.refresh_token:
-            logger.error("No refresh token available")
+            logger.error("No refresh token available - manual re-auth needed")
+            if self._auth_failure_callback:
+                self._auth_failure_callback("No refresh token available. Run: python scripts/ctrader_auth.py")
             return
 
         logger.info("Refreshing access token...")
@@ -725,13 +741,24 @@ class CTraderBroker(BrokerInterface):
                             lines[i] = f"CTRADER_REFRESH_TOKEN={self.refresh_token}"
                     env_path.write_text("\n".join(lines) + "\n")
 
-                # Re-authenticate
+                # Re-authenticate account with new token
+                self._authenticated.clear()
                 req = ProtoOAAccountAuthReq()
                 req.ctidTraderAccountId = self.account_id
                 req.accessToken = self.access_token
-                reactor.callFromThread(lambda: self.client.send(req))
-                logger.info("Token refreshed successfully")
+
+                def _send_reauth():
+                    d = self.client.send(req)
+                    d.addCallback(self._on_account_auth)
+                    d.addErrback(self._on_error)
+
+                reactor.callFromThread(_send_reauth)
+                logger.info("Token refreshed, re-authenticating account...")
             else:
                 logger.error(f"Token refresh failed: {result}")
+                if self._auth_failure_callback:
+                    self._auth_failure_callback(f"Token refresh failed: {result}")
         except Exception as e:
             logger.error(f"Token refresh error: {e}")
+            if self._auth_failure_callback:
+                self._auth_failure_callback(f"Token refresh error: {e}")
