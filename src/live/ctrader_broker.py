@@ -74,13 +74,16 @@ class CTraderBroker(BrokerInterface):
         account_id: int = None,
         is_live: bool = False,
         refresh_token: str = None,
+        account_env: str = None,
     ):
         _load_env()
 
         self.client_id = client_id or os.environ.get("CTRADER_CLIENT_ID", "")
         self.client_secret = client_secret or os.environ.get("CTRADER_CLIENT_SECRET", "")
         self.access_token = access_token or os.environ.get("CTRADER_ACCESS_TOKEN", "")
-        self.account_id = int(account_id or os.environ.get("CTRADER_ACCOUNT_ID", "0"))
+        # Support custom env var for account ID (e.g. CTRADER_SCALPER_ACCOUNT_ID)
+        account_env_var = account_env or "CTRADER_ACCOUNT_ID"
+        self.account_id = int(account_id or os.environ.get(account_env_var, "") or os.environ.get("CTRADER_ACCOUNT_ID", "0"))
         self.refresh_token = refresh_token or os.environ.get("CTRADER_REFRESH_TOKEN", "")
         self.is_live = is_live
 

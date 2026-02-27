@@ -1,0 +1,17 @@
+[Unit]
+Description=Supply & Demand Scalper EA
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/expert-advisor
+ExecStart=/root/expert-advisor/.venv/bin/python -u scripts/run_scalper.py --broker ctrader --profile conservative --capital 100
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:/root/expert-advisor/logs/scalper_service.log
+StandardError=append:/root/expert-advisor/logs/scalper_service.log
+
+[Install]
+WantedBy=multi-user.target
