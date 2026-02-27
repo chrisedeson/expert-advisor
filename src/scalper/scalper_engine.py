@@ -147,6 +147,11 @@ class ScalperEngine:
         # Key: symbol -> last M15 bar time when we entered
         self._last_entry_bar_time: Dict[str, Optional[datetime]] = {s: None for s in self.instruments}
 
+        # Market closed tracking: skip symbols whose market is closed
+        # Key: symbol -> expiry time (recheck after this time)
+        self._market_closed: Dict[str, datetime] = {}
+        self._market_closed_recheck_minutes = 15  # recheck every 15 min
+
         # State
         self.state_manager = StateManager(str(self.state_dir / "scalper_state.json"))
         self.cash_balance = initial_capital
@@ -304,6 +309,16 @@ class ScalperEngine:
         for symbol, weight in self.instruments.items():
             if weight <= 0:
                 continue
+
+            # Skip symbols whose market is known to be closed
+            if symbol in self._market_closed:
+                if now < self._market_closed[symbol]:
+                    if do_heartbeat:
+                        heartbeat_lines.append(f"{symbol} CLOSED")
+                    continue
+                else:
+                    # Recheck period expired, try again
+                    del self._market_closed[symbol]
 
             spec = SCALPER_INSTRUMENTS[symbol]
 
@@ -548,8 +563,15 @@ class ScalperEngine:
                 self._notify('send_trade_opened', symbol, direction,
                              actual_price, lot, sl, tp, zone_score=zone.strength)
             else:
-                logger.error(f"ORDER FAILED: {symbol} {direction} - {result.error}")
-                self._notify('send_error', f"Order failed: {direction} {symbol} - {result.error}")
+                error_str = str(result.error or "")
+                if "MARKET_CLOSED" in error_str:
+                    # Market is closed - suppress error, mark symbol for skip
+                    recheck_at = now + timedelta(minutes=self._market_closed_recheck_minutes)
+                    self._market_closed[symbol] = recheck_at
+                    logger.info(f"{symbol}: Market closed, skipping until {recheck_at.strftime('%H:%M UTC')}")
+                else:
+                    logger.error(f"ORDER FAILED: {symbol} {direction} - {result.error}")
+                    self._notify('send_error', f"Order failed: {direction} {symbol} - {result.error}")
 
     def _check_exits(self, symbol: str, bar: pd.Series, spec: dict):
         """Check if any positions hit SL/TP. Broker handles actual SL/TP, but we
