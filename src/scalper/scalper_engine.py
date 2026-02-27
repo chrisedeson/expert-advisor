@@ -137,6 +137,16 @@ class ScalperEngine:
         # Position tracking
         self.positions: Dict[str, List[ScalperPosition]] = {s: [] for s in self.instruments}
 
+        # Zone cooldown: tracks traded zones to prevent re-entry
+        # Key: symbol -> {zone_key -> cooldown_expiry_time}
+        # zone_key = f"{zone_type}_{top:.6f}_{bottom:.6f}"
+        self._zone_cooldowns: Dict[str, Dict[str, datetime]] = {s: {} for s in self.instruments}
+        self._zone_cooldown_minutes = 240  # 4 hours = 16 M15 bars
+
+        # Per-bar entry tracking: prevent multiple entries on same M15 bar
+        # Key: symbol -> last M15 bar time when we entered
+        self._last_entry_bar_time: Dict[str, Optional[datetime]] = {s: None for s in self.instruments}
+
         # State
         self.state_manager = StateManager(str(self.state_dir / "scalper_state.json"))
         self.cash_balance = initial_capital
@@ -338,17 +348,19 @@ class ScalperEngine:
             if do_heartbeat:
                 n_zones = len(self.active_zones[symbol])
                 n_pos = len(self.positions[symbol])
-                heartbeat_lines.append(f"{symbol} {close:.5f} zones={n_zones} pos={n_pos}")
+                n_cd = len(self._zone_cooldowns.get(symbol, {}))
+                heartbeat_lines.append(f"{symbol} {close:.5f} z={n_zones} p={n_pos} cd={n_cd}")
 
         if do_heartbeat and heartbeat_lines:
             open_count = sum(len(v) for v in self.positions.values())
+            total_cd = sum(len(v) for v in self._zone_cooldowns.values())
             log_str = " | ".join(heartbeat_lines)
-            logger.info(f"HEARTBEAT: {log_str} | total_pos={open_count} | sig={self.total_signals}")
+            logger.info(f"HEARTBEAT: {log_str} | total_pos={open_count} | cd={total_cd} | sig={self.total_signals}")
             tg_lines = "\n".join(heartbeat_lines)
             self._notify('send',
                 f"\U0001f493 <b>HEARTBEAT</b> ({now.strftime('%H:%M UTC')})\n"
                 f"{tg_lines}\n"
-                f"Open: {open_count} | Signals: {self.total_signals}")
+                f"Open: {open_count} | Cooldowns: {total_cd} | Signals: {self.total_signals}")
             self._last_heartbeat = now
 
     def _refresh_zones(self, symbol: str, htf_candles: pd.DataFrame):
@@ -379,6 +391,11 @@ class ScalperEngine:
         logger.debug(f"{symbol}: {len(self.active_zones[symbol])} active zones "
                       f"(from {len(all_zones)} total)")
 
+    @staticmethod
+    def _zone_key(zone: 'SupplyDemandZone') -> str:
+        """Unique key for a zone based on its identity (not entry price)."""
+        return f"{zone.zone_type}_{zone.top:.6f}_{zone.bottom:.6f}"
+
     def _check_entries(self, symbol: str, bar: pd.Series, atr: float,
                        spec: dict, now: datetime):
         """Check if M15 bar reacts to any active zone."""
@@ -387,20 +404,46 @@ class ScalperEngine:
         high = bar['high']
         low = bar['low']
 
+        # Get the current M15 bar time
+        bar_time = bar.name if hasattr(bar, 'name') and bar.name is not None else now
+
+        # GUARD: Only allow one entry per M15 bar per symbol
+        if self._last_entry_bar_time[symbol] is not None:
+            if bar_time == self._last_entry_bar_time[symbol]:
+                return  # Already entered on this bar
+            # If bar_time is a datetime, also check if within same 15-min window
+            if isinstance(bar_time, datetime) and isinstance(self._last_entry_bar_time[symbol], datetime):
+                diff = abs((bar_time - self._last_entry_bar_time[symbol]).total_seconds())
+                if diff < 900:  # 15 minutes
+                    return
+
         total_cost = (spec['spread'] + spec['slip']) * spec['pip_size']
         sl_buffer = 0.3 * atr  # ATR-based SL buffer
 
-        # Zones already used by open positions
-        used_zone_mids = set()
+        # Minimum SL distance: at least 3x the spread+slippage cost
+        # This prevents entries where SL is so tight the spread alone closes it
+        min_sl_distance = 3.0 * total_cost
+
+        # Clean expired cooldowns
+        expired_keys = [k for k, v in self._zone_cooldowns[symbol].items() if now > v]
+        for k in expired_keys:
+            del self._zone_cooldowns[symbol][k]
+
+        # Build set of zone keys currently in use (open positions + cooldowns)
+        used_zone_keys = set(self._zone_cooldowns[symbol].keys())
+        # Also block zones that match open positions
         for pos in self.positions[symbol]:
-            used_zone_mids.add(round(pos.entry_price, 6))
+            # Build approximate zone key from position metadata
+            pos_key = f"{pos.zone_type}_{pos.stop_loss:.6f}" if hasattr(pos, 'zone_type') else ""
+            used_zone_keys.add(pos_key)
 
         for zone in self.active_zones[symbol]:
             if len(self.positions[symbol]) >= self.profile['max_concurrent']:
                 break
 
-            # Skip if we already have a position from roughly this zone
-            if round(zone.mid, 6) in used_zone_mids:
+            # Skip zones in cooldown or already traded
+            zk = self._zone_key(zone)
+            if zk in used_zone_keys:
                 continue
 
             direction = None
@@ -438,6 +481,13 @@ class ScalperEngine:
             risk = abs(entry - sl)
             if risk <= 0:
                 continue
+
+            # GUARD: Reject entries where SL is too tight
+            if risk < min_sl_distance:
+                logger.debug(f"{symbol}: Skipping {direction} - SL too tight "
+                            f"({risk/spec['pip_size']:.1f} pips < min {min_sl_distance/spec['pip_size']:.1f} pips)")
+                continue
+
             tp = entry + risk * self.profile['fixed_rr'] if direction == 'BUY' else entry - risk * self.profile['fixed_rr']
 
             # Position sizing: risk% of capital
@@ -478,6 +528,14 @@ class ScalperEngine:
                 )
                 self.positions[symbol].append(pos)
                 self.total_trades_opened += 1
+
+                # Record zone cooldown to prevent re-entry
+                cooldown_expiry = now + timedelta(minutes=self._zone_cooldown_minutes)
+                self._zone_cooldowns[symbol][zk] = cooldown_expiry
+                logger.info(f"Zone cooldown set: {zk} until {cooldown_expiry.strftime('%H:%M UTC')}")
+
+                # Record this bar as "entered" - no more entries on this bar
+                self._last_entry_bar_time[symbol] = bar_time
 
                 self.state_manager.save_trade_log({
                     'event': 'OPEN', 'symbol': symbol, 'direction': direction,
@@ -655,6 +713,14 @@ class ScalperEngine:
                 }
                 for symbol, zones in self.active_zones.items()
             },
+            'zone_cooldowns': {
+                symbol: {
+                    zk: exp.isoformat()
+                    for zk, exp in cooldowns.items()
+                    if exp > datetime.now(timezone.utc)  # Only save unexpired
+                }
+                for symbol, cooldowns in self._zone_cooldowns.items()
+            },
         }
         self.state_manager.save(state)
 
@@ -685,9 +751,23 @@ class ScalperEngine:
                 )
                 self.positions[symbol].append(pos)
 
+        # Restore zone cooldowns
+        for symbol, cooldowns in state.get('zone_cooldowns', {}).items():
+            if symbol not in self._zone_cooldowns:
+                continue
+            now = datetime.now(timezone.utc)
+            for zk, exp_str in cooldowns.items():
+                try:
+                    exp = datetime.fromisoformat(exp_str)
+                    if exp > now:
+                        self._zone_cooldowns[symbol][zk] = exp
+                except (ValueError, TypeError):
+                    pass
+
         total_open = sum(len(v) for v in self.positions.values())
+        total_cooldowns = sum(len(v) for v in self._zone_cooldowns.values())
         logger.info(f"State restored: balance=${self.cash_balance:.2f}, "
-                     f"{total_open} open positions, "
+                     f"{total_open} open positions, {total_cooldowns} zone cooldowns, "
                      f"{self.total_trades_opened} opened, {self.total_trades_closed} closed")
 
     def status(self) -> Dict:

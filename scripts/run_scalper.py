@@ -66,11 +66,13 @@ def list_profiles():
     print(f"Strategy: Supply & Demand zones (H1) with M15 entries")
 
 
-def create_broker(broker_type: str, is_live: bool = False, account_env: str = None):
+def create_broker(broker_type: str, is_live: bool = False, account_env: str = None,
+                   watch_symbols: list = None):
     """Create the appropriate broker instance."""
     if broker_type == "ctrader":
         from src.live.ctrader_broker import CTraderBroker
-        return CTraderBroker(is_live=is_live, account_env=account_env)
+        return CTraderBroker(is_live=is_live, account_env=account_env,
+                            watch_symbols=watch_symbols)
     else:
         raise ValueError(f"Scalper only supports ctrader broker (got: {broker_type})")
 
@@ -146,8 +148,10 @@ def main():
     logger.info(f"State dir: {args.state_dir}")
     logger.info(f"Account env: {args.account_env}")
 
-    # Create broker
-    broker = create_broker(args.broker, args.live, args.account_env)
+    # Create broker with the scalper's instrument list
+    inst_list = list(instruments.keys()) if instruments else list(SCALPER_INSTRUMENTS.keys())
+    broker = create_broker(args.broker, args.live, args.account_env,
+                           watch_symbols=inst_list)
 
     # Create notifier
     notifier = None
@@ -181,7 +185,6 @@ def main():
         return
 
     # Start trading
-    inst_list = list(instruments.keys()) if instruments else list(SCALPER_INSTRUMENTS.keys())
     print(f"\nStarting {args.profile} scalper with ${args.capital}...")
     print(f"Broker: {broker_label}")
     print(f"Instruments: {', '.join(inst_list)}")

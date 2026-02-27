@@ -66,6 +66,9 @@ def _load_env():
 class CTraderBroker(BrokerInterface):
     """IC Markets cTrader broker via Open API."""
 
+    # Default symbols for the Grid EA
+    DEFAULT_SYMBOLS = ["EURUSD", "GBPUSD", "EURJPY", "XAGUSD", "US500"]
+
     def __init__(
         self,
         client_id: str = None,
@@ -75,6 +78,7 @@ class CTraderBroker(BrokerInterface):
         is_live: bool = False,
         refresh_token: str = None,
         account_env: str = None,
+        watch_symbols: List[str] = None,
     ):
         _load_env()
 
@@ -86,6 +90,7 @@ class CTraderBroker(BrokerInterface):
         self.account_id = int(account_id or os.environ.get(account_env_var, "") or os.environ.get("CTRADER_ACCOUNT_ID", "0"))
         self.refresh_token = refresh_token or os.environ.get("CTRADER_REFRESH_TOKEN", "")
         self.is_live = is_live
+        self.watch_symbols = watch_symbols or self.DEFAULT_SYMBOLS
 
         if not all([self.client_id, self.client_secret, self.access_token, self.account_id]):
             raise ValueError(
@@ -145,7 +150,7 @@ class CTraderBroker(BrokerInterface):
         time.sleep(1)  # Wait for symbol response
 
         # Subscribe to price feeds for our instruments
-        for name in ["EURUSD", "GBPUSD", "EURJPY", "XAGUSD", "US500"]:
+        for name in self.watch_symbols:
             sid = self._symbol_map.get(name)
             if sid:
                 self._subscribe_spots(sid)
@@ -583,7 +588,7 @@ class CTraderBroker(BrokerInterface):
                 # Request details for our symbols
                 our_ids = [
                     self._symbol_map[n]
-                    for n in ["EURUSD", "GBPUSD", "EURJPY", "XAGUSD", "US500"]
+                    for n in self.watch_symbols
                     if n in self._symbol_map
                 ]
                 if our_ids:
