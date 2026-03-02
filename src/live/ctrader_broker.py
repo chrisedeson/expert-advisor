@@ -199,13 +199,22 @@ class CTraderBroker(BrokerInterface):
         details = self._symbol_details.get(symbol_id, {})
         digits = details.get("digits", 5)
 
-        # Convert lot size to volume in cents (1.0 lot = 100000 units for forex)
+        # Convert lot size to volume (1.0 lot = lot_size_units volume)
         step_volume = details.get("step_volume", 1000)  # minimum increment
+        min_volume = details.get("min_volume", 1000)  # minimum order size
         lot_size_units = details.get("lot_size", 100000)
         volume = int(lot_size * lot_size_units)
-        # Round to step volume
-        if step_volume > 0:
-            volume = max(step_volume, (volume // step_volume) * step_volume)
+        # Round to step volume (but don't force up to step_volume if smaller)
+        if step_volume > 0 and volume >= step_volume:
+            volume = (volume // step_volume) * step_volume
+        # Check minimum volume - reject if too small rather than silently inflating
+        if volume < min_volume:
+            min_lot = min_volume / lot_size_units if lot_size_units > 0 else 0
+            return OrderResult(
+                success=False,
+                error=f"Volume {volume} below minimum {min_volume} "
+                      f"(need at least {min_lot:.4f} lot for {symbol})"
+            )
 
         # Round prices to symbol's allowed digits
         sl_rounded = round(stop_loss, digits)
