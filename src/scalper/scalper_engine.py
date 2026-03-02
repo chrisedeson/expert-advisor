@@ -593,12 +593,11 @@ class ScalperEngine:
                     recheck_at = now + timedelta(minutes=self._market_closed_recheck_minutes)
                     self._market_closed[symbol] = recheck_at
                     logger.info(f"{symbol}: Market closed, skipping until {recheck_at.strftime('%H:%M UTC')}")
-                elif "NOT_ENOUGH_MONEY" in error_str:
-                    # Not enough margin - suppress repeated errors, skip for 60 min
-                    recheck_at = now + timedelta(minutes=60)
-                    self._market_closed[symbol] = recheck_at
-                    logger.warning(f"{symbol}: Not enough margin for {lot} lot, skipping until {recheck_at.strftime('%H:%M UTC')}")
-                    self._notify('send_error', f"Margin insufficient for {direction} {symbol} {lot} lot. Skipping 60 min.")
+                elif "NOT_ENOUGH_MONEY" in error_str or "below minimum" in error_str:
+                    # Not enough margin or lot too small - skip permanently until restart
+                    self._market_closed[symbol] = now + timedelta(hours=24)
+                    logger.warning(f"{symbol}: {error_str} - disabling for 24h")
+                    self._notify('send_error', f"{symbol}: {error_str}. Disabled for 24h.")
                 else:
                     logger.error(f"ORDER FAILED: {symbol} {direction} - {result.error}")
                     self._notify('send_error', f"Order failed: {direction} {symbol} - {result.error}")
