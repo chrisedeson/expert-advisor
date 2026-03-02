@@ -75,6 +75,7 @@ class ScalperPosition:
     zone_type: str  # 'supply' or 'demand'
     sl_at_breakeven: bool = False
     order_id: Optional[str] = None
+    zone_key: Optional[str] = None  # Zone identity for touch tracking
 
 
 class ScalperEngine:
@@ -137,11 +138,12 @@ class ScalperEngine:
         # Position tracking
         self.positions: Dict[str, List[ScalperPosition]] = {s: [] for s in self.instruments}
 
-        # Zone cooldown: tracks traded zones to prevent re-entry
-        # Key: symbol -> {zone_key -> cooldown_expiry_time}
+        # Zone touch tracking: counts trades per zone (matches backtest z_touches)
+        # Key: symbol -> {zone_key -> trade_count}
         # zone_key = f"{zone_type}_{top:.6f}_{bottom:.6f}"
-        self._zone_cooldowns: Dict[str, Dict[str, datetime]] = {s: {} for s in self.instruments}
-        self._zone_cooldown_minutes = 240  # 4 hours = 16 M15 bars
+        self._zone_trades: Dict[str, Dict[str, int]] = {s: {} for s in self.instruments}
+        self._zone_last_seen: Dict[str, Dict[str, datetime]] = {s: {} for s in self.instruments}
+        self._zone_touch_limit = 3  # Max trades per zone (matches backtest touch_limit=3)
 
         # Per-bar entry tracking: prevent multiple entries on same M15 bar
         # Key: symbol -> last M15 bar time when we entered
@@ -363,19 +365,19 @@ class ScalperEngine:
             if do_heartbeat:
                 n_zones = len(self.active_zones[symbol])
                 n_pos = len(self.positions[symbol])
-                n_cd = len(self._zone_cooldowns.get(symbol, {}))
-                heartbeat_lines.append(f"{symbol} {close:.5f} z={n_zones} p={n_pos} cd={n_cd}")
+                n_zt = sum(self._zone_trades.get(symbol, {}).values())
+                heartbeat_lines.append(f"{symbol} {close:.5f} z={n_zones} p={n_pos} t={n_zt}")
 
         if do_heartbeat and heartbeat_lines:
             open_count = sum(len(v) for v in self.positions.values())
-            total_cd = sum(len(v) for v in self._zone_cooldowns.values())
+            total_zt = sum(sum(v.values()) for v in self._zone_trades.values())
             log_str = " | ".join(heartbeat_lines)
-            logger.info(f"HEARTBEAT: {log_str} | total_pos={open_count} | cd={total_cd} | sig={self.total_signals}")
+            logger.info(f"HEARTBEAT: {log_str} | total_pos={open_count} | zt={total_zt} | sig={self.total_signals}")
             tg_lines = "\n".join(heartbeat_lines)
             self._notify('send',
                 f"\U0001f493 <b>HEARTBEAT</b> ({now.strftime('%H:%M UTC')})\n"
                 f"{tg_lines}\n"
-                f"Open: {open_count} | Cooldowns: {total_cd} | Signals: {self.total_signals}")
+                f"Open: {open_count} | Touches: {total_zt} | Signals: {self.total_signals}")
             self._last_heartbeat = now
 
     def _refresh_zones(self, symbol: str, htf_candles: pd.DataFrame):
@@ -398,13 +400,33 @@ class ScalperEngine:
         # Only keep zones within reasonable age (last 200 bars)
         max_age = 200
         n_bars = len(htf_candles)
-        self.active_zones[symbol] = [
+        age_filtered = [
             z for z in valid_zones
             if (n_bars - z.creation_idx) <= max_age
         ]
 
-        logger.debug(f"{symbol}: {len(self.active_zones[symbol])} active zones "
-                      f"(from {len(all_zones)} total)")
+        # Filter out zones that have exceeded touch limit (matches backtest z_touches > touch_limit)
+        now = datetime.now(timezone.utc)
+        active = []
+        for z in age_filtered:
+            zk = self._zone_key(z)
+            self._zone_last_seen[symbol][zk] = now
+            trade_count = self._zone_trades[symbol].get(zk, 0)
+            if trade_count > self._zone_touch_limit:
+                continue  # Zone exhausted - same as backtest line 320
+            active.append(z)
+        self.active_zones[symbol] = active
+
+        # Cleanup stale zone records not seen in 24 hours
+        cutoff = now - timedelta(hours=24)
+        stale = [zk for zk, ts in self._zone_last_seen[symbol].items() if ts < cutoff]
+        for zk in stale:
+            self._zone_trades[symbol].pop(zk, None)
+            del self._zone_last_seen[symbol][zk]
+
+        logger.debug(f"{symbol}: {len(active)} active zones "
+                      f"(from {len(all_zones)} total, "
+                      f"{len(self._zone_trades[symbol])} tracked)")
 
     @staticmethod
     def _zone_key(zone: 'SupplyDemandZone') -> str:
@@ -439,26 +461,24 @@ class ScalperEngine:
         # This prevents entries where SL is so tight the spread alone closes it
         min_sl_distance = 3.0 * total_cost
 
-        # Clean expired cooldowns
-        expired_keys = [k for k, v in self._zone_cooldowns[symbol].items() if now > v]
-        for k in expired_keys:
-            del self._zone_cooldowns[symbol][k]
-
-        # Build set of zone keys currently in use (open positions + cooldowns)
-        used_zone_keys = set(self._zone_cooldowns[symbol].keys())
-        # Also block zones that match open positions
+        # Build set of zone keys with open positions (matches backtest used_zones)
+        used_zone_keys = set()
         for pos in self.positions[symbol]:
-            # Build approximate zone key from position metadata
-            pos_key = f"{pos.zone_type}_{pos.stop_loss:.6f}" if hasattr(pos, 'zone_type') else ""
-            used_zone_keys.add(pos_key)
+            if pos.zone_key:
+                used_zone_keys.add(pos.zone_key)
 
         for zone in self.active_zones[symbol]:
             if len(self.positions[symbol]) >= self.profile['max_concurrent']:
                 break
 
-            # Skip zones in cooldown or already traded
+            # Skip zones with open positions (matches backtest used_zones check)
             zk = self._zone_key(zone)
             if zk in used_zone_keys:
+                continue
+
+            # Skip zones that exceeded touch limit (matches backtest line 320)
+            trade_count = self._zone_trades[symbol].get(zk, 0)
+            if trade_count > self._zone_touch_limit:
                 continue
 
             direction = None
@@ -540,14 +560,17 @@ class ScalperEngine:
                     zone_score=zone.strength,
                     zone_type=zone.zone_type,
                     order_id=result.order_id,
+                    zone_key=zk,
                 )
                 self.positions[symbol].append(pos)
                 self.total_trades_opened += 1
 
-                # Record zone cooldown to prevent re-entry
-                cooldown_expiry = now + timedelta(minutes=self._zone_cooldown_minutes)
-                self._zone_cooldowns[symbol][zk] = cooldown_expiry
-                logger.info(f"Zone cooldown set: {zk} until {cooldown_expiry.strftime('%H:%M UTC')}")
+                # Increment zone touch counter (matches backtest z_touches[zi] += 1)
+                self._zone_trades[symbol][zk] = self._zone_trades[symbol].get(zk, 0) + 1
+                new_count = self._zone_trades[symbol][zk]
+                remaining = max(0, self._zone_touch_limit - new_count + 1)
+                logger.info(f"Zone touch: {zk} = {new_count}/{self._zone_touch_limit + 1} "
+                           f"({remaining} remaining)")
 
                 # Record this bar as "entered" - no more entries on this bar
                 self._last_entry_bar_time[symbol] = bar_time
@@ -717,6 +740,7 @@ class ScalperEngine:
                         'zone_score': p.zone_score, 'zone_type': p.zone_type,
                         'sl_at_breakeven': p.sl_at_breakeven,
                         'order_id': p.order_id,
+                        'zone_key': p.zone_key,
                     }
                     for p in positions
                 ]
@@ -735,13 +759,13 @@ class ScalperEngine:
                 }
                 for symbol, zones in self.active_zones.items()
             },
-            'zone_cooldowns': {
-                symbol: {
-                    zk: exp.isoformat()
-                    for zk, exp in cooldowns.items()
-                    if exp > datetime.now(timezone.utc)  # Only save unexpired
-                }
-                for symbol, cooldowns in self._zone_cooldowns.items()
+            'zone_trades': {
+                symbol: dict(trades)
+                for symbol, trades in self._zone_trades.items()
+            },
+            'zone_last_seen': {
+                symbol: {zk: ts.isoformat() for zk, ts in seen.items()}
+                for symbol, seen in self._zone_last_seen.items()
             },
         }
         self.state_manager.save(state)
@@ -770,26 +794,29 @@ class ScalperEngine:
                     zone_score=p.get('zone_score', 0), zone_type=p.get('zone_type', 'demand'),
                     sl_at_breakeven=p.get('sl_at_breakeven', False),
                     order_id=p.get('order_id'),
+                    zone_key=p.get('zone_key'),
                 )
                 self.positions[symbol].append(pos)
 
-        # Restore zone cooldowns
-        for symbol, cooldowns in state.get('zone_cooldowns', {}).items():
-            if symbol not in self._zone_cooldowns:
+        # Restore zone trade counts
+        for symbol, trades in state.get('zone_trades', {}).items():
+            if symbol in self._zone_trades:
+                self._zone_trades[symbol] = trades
+
+        # Restore zone last seen timestamps
+        for symbol, seen in state.get('zone_last_seen', {}).items():
+            if symbol not in self._zone_last_seen:
                 continue
-            now = datetime.now(timezone.utc)
-            for zk, exp_str in cooldowns.items():
+            for zk, ts_str in seen.items():
                 try:
-                    exp = datetime.fromisoformat(exp_str)
-                    if exp > now:
-                        self._zone_cooldowns[symbol][zk] = exp
+                    self._zone_last_seen[symbol][zk] = datetime.fromisoformat(ts_str)
                 except (ValueError, TypeError):
                     pass
 
         total_open = sum(len(v) for v in self.positions.values())
-        total_cooldowns = sum(len(v) for v in self._zone_cooldowns.values())
+        total_zt = sum(sum(v.values()) for v in self._zone_trades.values())
         logger.info(f"State restored: balance=${self.cash_balance:.2f}, "
-                     f"{total_open} open positions, {total_cooldowns} zone cooldowns, "
+                     f"{total_open} open positions, {total_zt} zone touches, "
                      f"{self.total_trades_opened} opened, {self.total_trades_closed} closed")
 
     def status(self) -> Dict:
