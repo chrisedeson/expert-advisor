@@ -245,6 +245,7 @@ class ScalperEngine:
             return
 
         self._restore_state()
+        self._reconcile_positions()
         self.running = True
         logger.info("Scalper engine started.")
 
@@ -722,6 +723,118 @@ class ScalperEngine:
         )
         self._notify('send', msg)
         logger.info(f"Session end: balance=${account.balance:.2f}, equity=${account.equity:.2f}")
+
+    def _reconcile_positions(self):
+        """Reconcile internal position tracking with broker's actual positions.
+
+        Handles two cases:
+        - Ghost positions: in our state but closed on broker (removed while offline)
+        - Orphan positions: on broker but not in our state (state was cleared)
+        """
+        try:
+            broker_positions = self.broker.get_open_positions()
+        except Exception as e:
+            logger.warning(f"Reconciliation skipped - couldn't fetch broker positions: {e}")
+            return
+
+        if broker_positions is None:
+            broker_positions = []
+
+        # Build broker position map: positionId -> position dict
+        broker_map = {}
+        for bp in broker_positions:
+            pid = str(bp.get('positionId', bp.get('order_id', bp.get('id', ''))))
+            if pid:
+                broker_map[pid] = bp
+
+        # Build our tracked position map: order_id -> (symbol, index)
+        our_map = {}
+        for symbol, positions in self.positions.items():
+            for i, pos in enumerate(positions):
+                if pos.order_id:
+                    our_map[str(pos.order_id)] = (symbol, pos)
+
+        # Case A: Ghost positions (in our state, not on broker)
+        ghosts = []
+        for order_id, (symbol, pos) in our_map.items():
+            if order_id not in broker_map:
+                ghosts.append((symbol, pos))
+
+        for symbol, pos in ghosts:
+            self.positions[symbol] = [p for p in self.positions[symbol]
+                                       if str(p.order_id) != str(pos.order_id)]
+            logger.info(f"GHOST: {pos.direction} {symbol} (id={pos.order_id}) "
+                        f"was closed while offline, removed from tracking")
+
+        if ghosts:
+            ghost_summary = ", ".join(f"{p.direction} {s}" for s, p in ghosts)
+            self._notify('send', f"\U0001f47b <b>RECONCILIATION</b>\n"
+                        f"Removed {len(ghosts)} ghost position(s) "
+                        f"(closed while offline):\n{ghost_summary}")
+
+        # Case B: Orphan positions (on broker, not in our state)
+        our_ids = set(our_map.keys())
+        orphans = []
+        for pid, bp in broker_map.items():
+            if pid not in our_ids:
+                orphans.append((pid, bp))
+
+        adopted = 0
+        for pid, bp in orphans:
+            symbol_id = bp.get('symbolId')
+            symbol_name = None
+            if hasattr(self.broker, 'get_symbol_name'):
+                symbol_name = self.broker.get_symbol_name(symbol_id)
+
+            if not symbol_name or symbol_name not in self.instruments:
+                logger.warning(f"ORPHAN: Position {pid} on unknown/untracked symbol "
+                              f"(id={symbol_id}, name={symbol_name}). Leaving on broker.")
+                continue
+
+            direction = bp.get('direction', 'BUY')
+            entry_price = bp.get('price', 0)
+            volume = bp.get('volume', 0)
+            spec = SCALPER_INSTRUMENTS.get(symbol_name, {})
+            lot_size_units = spec.get('pip_value', 1.0)  # approximate
+            # Convert volume back to lots (volume is in units, lot = volume / lot_size)
+            # For most instruments, lot_size is 100000 for forex, varies for others
+            # We don't have exact lot_size here, so estimate from volume
+            lot = volume / 100000.0 if volume > 1000 else volume / 100.0
+
+            pos = ScalperPosition(
+                symbol=symbol_name,
+                direction=direction,
+                entry_price=entry_price,
+                entry_time=datetime.now(timezone.utc),
+                lot_size=round(lot, 3),
+                stop_loss=0,  # Unknown, broker handles it
+                take_profit=0,  # Unknown, broker handles it
+                zone_score=0,
+                zone_type='unknown',
+                order_id=pid,
+                zone_key=None,
+            )
+            self.positions[symbol_name].append(pos)
+            adopted += 1
+            logger.info(f"ADOPTED: {direction} {symbol_name} @ {entry_price:.5f} "
+                        f"(id={pid}, lot~{lot:.3f})")
+
+        if adopted > 0:
+            adopted_summary = ", ".join(
+                f"{bp.get('direction','')} {self.broker.get_symbol_name(bp.get('symbolId',0)) or '?'}"
+                for _, bp in orphans
+                if (self.broker.get_symbol_name(bp.get('symbolId', 0)) or '') in self.instruments
+            )
+            self._notify('send', f"\U0001f50d <b>RECONCILIATION</b>\n"
+                        f"Adopted {adopted} orphan position(s) from broker:\n"
+                        f"{adopted_summary}")
+
+        total_open = sum(len(v) for v in self.positions.values())
+        if ghosts or adopted:
+            logger.info(f"Reconciliation complete: {len(ghosts)} ghosts removed, "
+                        f"{adopted} orphans adopted. Total tracked: {total_open}")
+        else:
+            logger.info(f"Reconciliation: all positions match. Tracked: {total_open}")
 
     def _save_state(self):
         state = {

@@ -105,6 +105,7 @@ class CTraderBroker(BrokerInterface):
         self._connected = threading.Event()
         self._authenticated = threading.Event()
         self._symbol_map: Dict[str, int] = {}  # name -> symbolId
+        self._symbol_id_to_name: Dict[int, str] = {}  # symbolId -> name
         self._symbol_details: Dict[int, Dict] = {}  # symbolId -> details
         self._spot_prices: Dict[int, Dict] = {}  # symbolId -> {bid, ask}
         self._positions: Dict[int, Dict] = {}  # positionId -> position data
@@ -380,6 +381,10 @@ class CTraderBroker(BrokerInterface):
             positions = [p for p in positions if p.get("symbolId") == symbol_id]
         return positions
 
+    def get_symbol_name(self, symbol_id: int) -> Optional[str]:
+        """Get symbol name from symbolId."""
+        return self._symbol_id_to_name.get(symbol_id)
+
     def get_candles(
         self,
         symbol: str,
@@ -584,6 +589,7 @@ class CTraderBroker(BrokerInterface):
             elif msg_type == "ProtoOASymbolsListRes":
                 for sym in result.symbol:
                     self._symbol_map[sym.symbolName] = sym.symbolId
+                    self._symbol_id_to_name[sym.symbolId] = sym.symbolName
                 logger.info(f"Loaded {len(result.symbol)} symbols")
                 # Request details for our symbols
                 our_ids = [
