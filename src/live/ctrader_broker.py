@@ -385,6 +385,11 @@ class CTraderBroker(BrokerInterface):
         """Get symbol name from symbolId."""
         return self._symbol_id_to_name.get(symbol_id)
 
+    def get_symbol_lot_size(self, symbol_id: int) -> int:
+        """Get lot_size (units per lot) for a symbol. E.g. 100000 for forex, 100 for indices."""
+        details = self._symbol_details.get(symbol_id, {})
+        return details.get("lot_size", 100000)
+
     def get_candles(
         self,
         symbol: str,

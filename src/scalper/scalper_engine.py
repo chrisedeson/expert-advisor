@@ -794,12 +794,12 @@ class ScalperEngine:
             direction = bp.get('direction', 'BUY')
             entry_price = bp.get('price', 0)
             volume = bp.get('volume', 0)
-            spec = SCALPER_INSTRUMENTS.get(symbol_name, {})
-            lot_size_units = spec.get('pip_value', 1.0)  # approximate
-            # Convert volume back to lots (volume is in units, lot = volume / lot_size)
-            # For most instruments, lot_size is 100000 for forex, varies for others
-            # We don't have exact lot_size here, so estimate from volume
-            lot = volume / 100000.0 if volume > 1000 else volume / 100.0
+            # Use broker's actual lot_size for accurate volume-to-lot conversion
+            if hasattr(self.broker, 'get_symbol_lot_size'):
+                lot_size_units = self.broker.get_symbol_lot_size(symbol_id)
+            else:
+                lot_size_units = 100000  # fallback
+            lot = volume / lot_size_units if lot_size_units > 0 else volume / 100000.0
 
             pos = ScalperPosition(
                 symbol=symbol_name,
