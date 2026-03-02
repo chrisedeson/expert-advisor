@@ -611,7 +611,7 @@ class ScalperEngine:
 
         # Get broker positions to detect broker-side closes
         broker_positions = self.broker.get_open_positions(symbol)
-        broker_ids = {str(p.get('order_id', p.get('id', ''))) for p in broker_positions} if broker_positions else set()
+        broker_ids = {str(p.get('positionId', p.get('order_id', p.get('id', '')))) for p in broker_positions} if broker_positions else set()
 
         to_remove = []
         for i, pos in enumerate(self.positions[symbol]):
