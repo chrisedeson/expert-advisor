@@ -116,6 +116,10 @@ class ScalperBacktester:
         zone_touch_limit: int = 3,
         consecutive_candles: int = 4,
         ema_period: int = 200,
+        max_risk_pct: float = 0.05,
+        max_sl_atr_mult: float = 3.0,
+        daily_loss_limit: float = 0.06,
+        max_dd_halt: float = 0.15,
     ):
         self.initial_balance = initial_balance
         self.spread_pips = spread_pips
@@ -135,6 +139,10 @@ class ScalperBacktester:
         self.session_end = session_end
         self.risk_pct = risk_pct_per_trade
         self.compound = compound
+        self.max_risk_pct = max_risk_pct
+        self.max_sl_atr_mult = max_sl_atr_mult
+        self.daily_loss_limit = daily_loss_limit
+        self.max_dd_halt = max_dd_halt
 
         self.total_cost = (spread_pips + slippage_pips) * pip_size
 
@@ -219,6 +227,15 @@ class ScalperBacktester:
         daily_bal = {}
         eq_curve = []
 
+        # Circuit breaker state
+        daily_pnl = 0.0
+        daily_date = ''
+        halted = False  # Max DD halt
+        daily_halted = False  # Daily loss halt
+
+        # Minimum SL distance (3x spread+slip cost)
+        min_sl_distance = 3.0 * self.total_cost
+
         # Build active zone set: only zones created before current HTF bar
         # Sorted by creation index for efficient activation
         zone_order = np.argsort(z_created)
@@ -262,6 +279,7 @@ class ScalperBacktester:
                         pips = ((ex_price - pos.entry_price) if pos.direction == 1 else (pos.entry_price - ex_price)) / self.pip_size
                         pnl = pips * self.pip_value * pos.lot_size
                         balance += pnl
+                        daily_pnl += pnl
                         risk_pips = abs(pos.entry_price - pos.sl) / self.pip_size
                         rr = pips / risk_pips if risk_pips > 0 else 0
 
@@ -341,10 +359,35 @@ class ScalperBacktester:
                 eq_curve.append(equity)
                 continue
 
+            # --- Circuit breakers ---
+            day_key_cb = str(ltf_data.index[i])[:10]
+            if day_key_cb != daily_date:
+                daily_date = day_key_cb
+                daily_pnl = 0.0
+                daily_halted = False
+
+            # Max DD halt
+            if not halted and peak_bal > 0:
+                dd_check = (peak_bal - balance) / peak_bal
+                if dd_check >= self.max_dd_halt:
+                    halted = True
+
+            # Daily loss limit
+            if not daily_halted and balance > 0 and daily_pnl < 0:
+                if abs(daily_pnl) / balance >= self.daily_loss_limit:
+                    daily_halted = True
+
             # --- Check for entries (only check active zones) ---
-            if len(positions) < self.max_concurrent and atr > 0 and active_set:
+            if not halted and not daily_halted and len(positions) < self.max_concurrent and atr > 0 and active_set:
                 sl_buf = self.sl_buffer_atr_mult * atr
                 used_zones = {p.zone_idx for p in positions}
+
+                # Max affordable SL at 0.01 lot
+                max_risk_amt = balance * self.max_risk_pct
+                min_lot = 0.01
+                max_sl_dist = max_risk_amt / (min_lot * self.pip_value / self.pip_size) if (min_lot * self.pip_value) > 0 else 1e10
+                max_sl_atr = self.max_sl_atr_mult * atr
+                max_sl_dist = min(max_sl_dist, max_sl_atr)
 
                 for zi in active_set:
                     if len(positions) >= self.max_concurrent:
@@ -362,15 +405,29 @@ class ScalperBacktester:
                             sl = z_bot[zi] - sl_buf
                             if sl >= entry:
                                 continue
-                            risk = entry - sl
-                            tp = entry + risk * self.fixed_rr_target
-                            if risk <= 0:
+                            zone_risk = entry - sl
+                            if zone_risk <= 0 or zone_risk < min_sl_distance:
                                 continue
+
+                            # Tighten SL if zone is too wide
+                            if zone_risk > max_sl_dist:
+                                if max_sl_dist < min_sl_distance:
+                                    continue
+                                risk = max_sl_dist
+                                sl = entry - risk
+                            else:
+                                risk = zone_risk
+
+                            tp = entry + risk * self.fixed_rr_target
 
                             risk_amt = balance * self.risk_pct if self.compound else self.initial_balance * self.risk_pct
                             sl_pips = risk / self.pip_size
                             lot = risk_amt / (sl_pips * self.pip_value) if sl_pips * self.pip_value > 0 else 0
                             lot = max(0.01, round(lot, 2))
+
+                            # Final safety: reject if actual risk exceeds hard cap
+                            if sl_pips * self.pip_value * lot > max_risk_amt:
+                                continue
 
                             positions.append(_OpenPos(1, entry, ltf_data.index[i], sl, tp, lot, zi, i))
                             z_touches[zi] += 1
@@ -385,15 +442,29 @@ class ScalperBacktester:
                             sl = z_top[zi] + sl_buf
                             if sl <= entry:
                                 continue
-                            risk = sl - entry
-                            tp = entry - risk * self.fixed_rr_target
-                            if risk <= 0:
+                            zone_risk = sl - entry
+                            if zone_risk <= 0 or zone_risk < min_sl_distance:
                                 continue
+
+                            # Tighten SL if zone is too wide
+                            if zone_risk > max_sl_dist:
+                                if max_sl_dist < min_sl_distance:
+                                    continue
+                                risk = max_sl_dist
+                                sl = entry + risk
+                            else:
+                                risk = zone_risk
+
+                            tp = entry - risk * self.fixed_rr_target
 
                             risk_amt = balance * self.risk_pct if self.compound else self.initial_balance * self.risk_pct
                             sl_pips = risk / self.pip_size
                             lot = risk_amt / (sl_pips * self.pip_value) if sl_pips * self.pip_value > 0 else 0
                             lot = max(0.01, round(lot, 2))
+
+                            # Final safety: reject if actual risk exceeds hard cap
+                            if sl_pips * self.pip_value * lot > max_risk_amt:
+                                continue
 
                             positions.append(_OpenPos(-1, entry, ltf_data.index[i], sl, tp, lot, zi, i))
                             z_touches[zi] += 1

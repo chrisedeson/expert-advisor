@@ -124,6 +124,10 @@ def run_single(
         zone_touch_limit=zone_touches,
         consecutive_candles=consecutive,
         ema_period=ema_period,
+        max_risk_pct=0.05,
+        max_sl_atr_mult=3.0,
+        daily_loss_limit=0.06,
+        max_dd_halt=0.15,
     )
 
     result = bt.run_backtest(htf_data, ltf_data, symbol=symbol, htf_name=htf, ltf_name=ltf)

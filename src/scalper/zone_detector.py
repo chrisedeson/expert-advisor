@@ -368,13 +368,16 @@ class ZoneDetector:
             green_count, has_fvg, has_bos, ema_aligned, clean, push_size, zone_range
         )
 
-        ts = df.index[zone_candle_idx] if hasattr(df.index, '__getitem__') else datetime.now()
+        # creation_idx = push_end + 1: zone can only be known AFTER the push completes
+        # Using zone_candle_idx would allow look-ahead (trading during the push)
+        known_at_idx = min(push_end + 1, len(df) - 1)
+        ts = df.index[known_at_idx] if hasattr(df.index, '__getitem__') else datetime.now()
 
         return SupplyDemandZone(
             zone_type='demand',
             top=zone_top,
             bottom=zone_bottom,
-            creation_idx=zone_candle_idx,
+            creation_idx=known_at_idx,
             creation_time=ts,
             strength=score,
             has_fvg=has_fvg,
@@ -456,13 +459,15 @@ class ZoneDetector:
             red_count, has_fvg, has_bos, ema_aligned, clean, push_size, zone_range
         )
 
-        ts = df.index[zone_candle_idx] if hasattr(df.index, '__getitem__') else datetime.now()
+        # creation_idx = push_end + 1: zone can only be known AFTER the push completes
+        known_at_idx = min(push_end + 1, len(df) - 1)
+        ts = df.index[known_at_idx] if hasattr(df.index, '__getitem__') else datetime.now()
 
         return SupplyDemandZone(
             zone_type='supply',
             top=zone_top,
             bottom=zone_bottom,
-            creation_idx=zone_candle_idx,
+            creation_idx=known_at_idx,
             creation_time=ts,
             strength=score,
             has_fvg=has_fvg,

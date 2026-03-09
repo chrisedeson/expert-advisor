@@ -26,14 +26,11 @@ from .zone_detector import ZoneDetector, SupplyDemandZone
 logger = logging.getLogger('scalper_engine')
 
 
-# Top instruments from MC validation (all 100% profitable)
+# MC-validated instruments (H4 zones, all 100% profitable in 200 MC sims)
 SCALPER_INSTRUMENTS = {
-    'US500':   {'pip_size': 0.01,   'pip_value': 1.0,  'spread': 0.5,  'slip': 0.2,  'lot_scale': 0.1},
-    'XAUUSD':  {'pip_size': 0.01,   'pip_value': 1.0,  'spread': 2.5,  'slip': 0.5,  'lot_scale': 1.0},
-    'XAGUSD':  {'pip_size': 0.001,  'pip_value': 5.0,  'spread': 3.0,  'slip': 0.5,  'lot_scale': 0.1},
-    'USTEC':   {'pip_size': 0.01,   'pip_value': 1.0,  'spread': 1.5,  'slip': 0.3,  'lot_scale': 0.1},
+    'USDJPY':  {'pip_size': 0.01,   'pip_value': 6.67, 'spread': 0.8,  'slip': 0.2,  'lot_scale': 1.0},
     'EURUSD':  {'pip_size': 0.0001, 'pip_value': 10.0, 'spread': 0.7,  'slip': 0.2,  'lot_scale': 1.0},
-    'ETHUSD':  {'pip_size': 0.01,   'pip_value': 1.0,  'spread': 2.0,  'slip': 0.5,  'lot_scale': 0.1},
+    'GBPUSD':  {'pip_size': 0.0001, 'pip_value': 10.0, 'spread': 0.9,  'slip': 0.3,  'lot_scale': 1.0},
 }
 
 SCALPER_PROFILES = {
@@ -41,22 +38,34 @@ SCALPER_PROFILES = {
         'risk_pct': 0.02,
         'max_concurrent': 3,
         'fixed_rr': 2.0,
-        'min_score': 5.0,
+        'min_score': 3.0,           # MC-validated at score 3.0
+        'max_risk_pct': 0.05,       # Hard cap: skip trade if 0.01 lot risks more than 5%
+        'daily_loss_limit': 0.06,    # Stop trading for the day after 6% loss
+        'max_dd_halt': 0.15,         # Halt all trading if DD exceeds 15%
+        'max_sl_atr_mult': 3.0,      # Max SL distance = 3x ATR (reject wider zones)
         'description': 'Low risk: 2% per trade, R:R 2.0, max 3 concurrent',
     },
     'balanced': {
         'risk_pct': 0.03,
-        'max_concurrent': 5,
+        'max_concurrent': 3,
         'fixed_rr': 2.0,
-        'min_score': 5.0,
-        'description': 'Moderate: 3% per trade, R:R 2.0, max 5 concurrent',
+        'min_score': 3.0,
+        'max_risk_pct': 0.06,
+        'daily_loss_limit': 0.08,
+        'max_dd_halt': 0.20,
+        'max_sl_atr_mult': 3.0,
+        'description': 'Moderate: 3% per trade, R:R 2.0, max 3 concurrent',
     },
     'aggressive': {
         'risk_pct': 0.05,
-        'max_concurrent': 5,
+        'max_concurrent': 3,
         'fixed_rr': 3.0,
         'min_score': 3.0,
-        'description': 'High risk: 5% per trade, R:R 3.0, max 5 concurrent',
+        'max_risk_pct': 0.08,
+        'daily_loss_limit': 0.10,
+        'max_dd_halt': 0.25,
+        'max_sl_atr_mult': 4.0,
+        'description': 'High risk: 5% per trade, R:R 3.0, max 3 concurrent',
     },
 }
 
@@ -91,7 +100,7 @@ class ScalperEngine:
         notifier=None,
         session_start: int = -1,
         session_end: int = -1,
-        htf: str = 'H1',
+        htf: str = 'H4',
         ltf: str = 'M15',
     ):
         self.broker = broker
@@ -163,6 +172,13 @@ class ScalperEngine:
         self.total_signals = 0
         self.total_trades_opened = 0
         self.total_trades_closed = 0
+
+        # Risk management: daily loss tracking and circuit breakers
+        self._daily_pnl: float = 0.0
+        self._daily_date: Optional[str] = None  # Reset each new day
+        self._peak_balance: float = initial_capital
+        self._halted: bool = False  # True if max DD breached
+        self._daily_halted: bool = False  # True if daily loss limit hit
 
         # Notification tracking
         self._session_start_date: Optional[str] = None
@@ -303,8 +319,57 @@ class ScalperEngine:
                 self._save_state()
                 time.sleep(60)
 
+    def _sync_balance_from_broker(self):
+        """Sync cash_balance from actual broker account."""
+        try:
+            account = self.broker.get_account_info()
+            self.cash_balance = account.balance
+            self._peak_balance = max(self._peak_balance, self.cash_balance)
+        except Exception as e:
+            logger.warning(f"Failed to sync balance from broker: {e}")
+
+    def _check_circuit_breakers(self, now: datetime) -> bool:
+        """Check if trading should be halted. Returns True if halted."""
+        # Reset daily tracking on new day
+        today = now.strftime('%Y-%m-%d')
+        if self._daily_date != today:
+            self._daily_date = today
+            self._daily_pnl = 0.0
+            self._daily_halted = False
+
+        # Max drawdown halt (persists until restart)
+        if self._halted:
+            return True
+        dd = (self._peak_balance - self.cash_balance) / self._peak_balance if self._peak_balance > 0 else 0
+        max_dd_limit = self.profile.get('max_dd_halt', 0.15)
+        if dd >= max_dd_limit:
+            self._halted = True
+            msg = f"MAX DD HALT: {dd*100:.1f}% DD (limit {max_dd_limit*100:.0f}%). Trading stopped."
+            logger.error(msg)
+            self._notify('send_error', msg)
+            return True
+
+        # Daily loss limit
+        if self._daily_halted:
+            return True
+        daily_limit = self.profile.get('daily_loss_limit', 0.06)
+        if self.cash_balance > 0 and abs(self._daily_pnl) / self.cash_balance >= daily_limit and self._daily_pnl < 0:
+            self._daily_halted = True
+            msg = f"DAILY LOSS LIMIT: ${self._daily_pnl:.2f} ({abs(self._daily_pnl/self.cash_balance)*100:.1f}%). No new trades today."
+            logger.warning(msg)
+            self._notify('send_error', msg)
+            return True
+
+        return False
+
     def _trading_tick(self, now: datetime):
         """One tick: refresh zones, check entries, manage positions."""
+        # Sync balance from broker every tick
+        self._sync_balance_from_broker()
+
+        # Check circuit breakers
+        halted = self._check_circuit_breakers(now)
+
         do_heartbeat = (self._last_heartbeat is None or
                         (now - self._last_heartbeat).total_seconds() >= 3600)
         heartbeat_lines = []
@@ -352,14 +417,14 @@ class ScalperEngine:
                 # Compute ATR from LTF data
                 atr = self._compute_atr_single(ltf_candles)
 
-            # 5. Check exits on open positions
+            # 5. Check exits on open positions (always, even if halted)
             self._check_exits(symbol, current_bar, spec)
 
-            # 6. Update breakeven
+            # 6. Update breakeven (always, even if halted)
             self._update_breakeven(symbol, current_bar, spec)
 
-            # 7. Check for new entries
-            if len(self.positions[symbol]) < self.profile['max_concurrent'] and atr > 0:
+            # 7. Check for new entries (only if not halted)
+            if not halted and len(self.positions[symbol]) < self.profile['max_concurrent'] and atr > 0:
                 self._check_entries(symbol, current_bar, atr, spec, now)
 
             # Heartbeat info
@@ -372,11 +437,14 @@ class ScalperEngine:
         if do_heartbeat and heartbeat_lines:
             open_count = sum(len(v) for v in self.positions.values())
             total_zt = sum(sum(v.values()) for v in self._zone_trades.values())
+            dd = (self._peak_balance - self.cash_balance) / self._peak_balance * 100 if self._peak_balance > 0 else 0
             log_str = " | ".join(heartbeat_lines)
             logger.info(f"HEARTBEAT: {log_str} | total_pos={open_count} | zt={total_zt} | sig={self.total_signals}")
             tg_lines = "\n".join(heartbeat_lines)
+            status = "HALTED" if halted else "ACTIVE"
             self._notify('send',
-                f"\U0001f493 <b>HEARTBEAT</b> ({now.strftime('%H:%M UTC')})\n"
+                f"\U0001f493 <b>HEARTBEAT</b> ({now.strftime('%H:%M UTC')}) [{status}]\n"
+                f"Balance: ${self.cash_balance:.2f} | DD: {dd:.1f}% | Daily P&L: ${self._daily_pnl:.2f}\n"
                 f"{tg_lines}\n"
                 f"Open: {open_count} | Touches: {total_zt} | Signals: {self.total_signals}")
             self._last_heartbeat = now
@@ -513,16 +581,46 @@ class ScalperEngine:
             if direction is None:
                 continue
 
-            # Calculate risk and TP
-            risk = abs(entry - sl)
-            if risk <= 0:
+            # Calculate risk distance (zone-based SL)
+            zone_risk = abs(entry - sl)
+            if zone_risk <= 0:
                 continue
 
-            # GUARD: Reject entries where SL is too tight
-            if risk < min_sl_distance:
+            # GUARD: Reject entries where SL is too tight (spread would eat it)
+            if zone_risk < min_sl_distance:
                 logger.debug(f"{symbol}: Skipping {direction} - SL too tight "
-                            f"({risk/spec['pip_size']:.1f} pips < min {min_sl_distance/spec['pip_size']:.1f} pips)")
+                            f"({zone_risk/spec['pip_size']:.1f} pips < min {min_sl_distance/spec['pip_size']:.1f} pips)")
                 continue
+
+            # Compute max affordable SL distance at 0.01 lot (the broker minimum)
+            # max_risk_pct caps what fraction of account a single trade can risk
+            max_risk_pct = self.profile.get('max_risk_pct', 0.05)
+            max_risk_amt = self.cash_balance * max_risk_pct
+            min_lot = 0.01 * spec['lot_scale']
+            if min_lot <= 0:
+                min_lot = 0.01
+            max_sl_distance = max_risk_amt / (min_lot * spec['pip_value'] / spec['pip_size']) if (min_lot * spec['pip_value']) > 0 else zone_risk
+
+            # Also cap SL at max_sl_atr_mult * ATR
+            max_sl_atr = self.profile.get('max_sl_atr_mult', 3.0) * atr
+            max_sl_distance = min(max_sl_distance, max_sl_atr)
+
+            # If zone SL is too wide, tighten it to fit our risk budget
+            if zone_risk > max_sl_distance:
+                if max_sl_distance < min_sl_distance:
+                    # Can't even afford the minimum SL - skip entirely
+                    logger.debug(f"{symbol}: Skipping {direction} - can't afford min SL at 0.01 lot")
+                    continue
+                # Tighten SL to max affordable distance
+                risk = max_sl_distance
+                if direction == 'BUY':
+                    sl = entry - risk
+                else:
+                    sl = entry + risk
+                logger.info(f"{symbol}: Tightened SL from {zone_risk/spec['pip_size']:.0f} to "
+                           f"{risk/spec['pip_size']:.0f} pips (zone too wide)")
+            else:
+                risk = zone_risk
 
             tp = entry + risk * self.profile['fixed_rr'] if direction == 'BUY' else entry - risk * self.profile['fixed_rr']
 
@@ -532,6 +630,13 @@ class ScalperEngine:
             lot = risk_amt / (sl_pips * spec['pip_value']) if sl_pips * spec['pip_value'] > 0 else 0
             lot *= spec['lot_scale']
             lot = max(0.01, round(lot, 2))
+
+            # Final safety: verify actual dollar risk at this lot doesn't exceed hard cap
+            actual_risk_dollars = sl_pips * spec['pip_value'] * lot
+            if actual_risk_dollars > max_risk_amt:
+                logger.debug(f"{symbol}: Skipping {direction} - ${actual_risk_dollars:.2f} risk "
+                            f"exceeds ${max_risk_amt:.2f} cap even after SL tightening")
+                continue
 
             # Execute
             self.total_signals += 1
@@ -629,6 +734,9 @@ class ScalperEngine:
 
                 logger.info(f"BROKER-CLOSED: {pos.direction} {symbol} ~{close_price:.5f}, "
                              f"reason~{reason}, pips~{pips:.1f}, P&L~${net_pnl:.2f}")
+
+                # Track daily P&L for circuit breaker
+                self._daily_pnl += net_pnl
 
                 self._notify('send_trade_closed', symbol, pos.direction,
                              close_price, f"{reason} (broker)", pips, net_pnl)
